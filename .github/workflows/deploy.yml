@@ -212,12 +212,10 @@ jobs:
       # Prefer the storage account just created by the prereqs job; otherwise fall back to the repo variable.
       ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.prereqs.outputs.artifacts_storage_account || vars.ARTIFACTS_STORAGE_ACCOUNT }}
     outputs:
-      artifacts_location: ${{ steps.urls.outputs.artifacts_location }}
-      artifacts_sas: ${{ steps.sas.outputs.sas }}
+      artifacts_location: ${{ steps.publish.outputs.artifacts_location }}
+      artifacts_sas: ${{ steps.publish.outputs.sas }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dsc-configuration
+      - uses: actions/checkout@v4
 
       - name: Azure login (OIDC)
         uses: azure/login@v3
@@ -226,41 +224,18 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Upload Configuration.zip
+      - name: Publish DSC artifact (scripts/Publish-DscArtifact.ps1)
+        id: publish
+        shell: pwsh
         run: |
-          az storage blob upload \
-            --account-name "$ARTIFACTS_STORAGE_ACCOUNT" \
-            --container-name "$ARTIFACTS_CONTAINER" \
-            --name Configuration.zip \
-            --file Configuration.zip \
-            --overwrite \
-            --auth-mode login
-
-      - name: Generate short-lived user-delegation SAS
-        id: sas
-        run: |
-          set -euo pipefail
-          EXPIRY=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%MZ')
-
-          SAS=$(az storage blob generate-sas \
-            --account-name "$ARTIFACTS_STORAGE_ACCOUNT" \
-            --container-name "$ARTIFACTS_CONTAINER" \
-            --name Configuration.zip \
-            --permissions r \
-            --expiry "$EXPIRY" \
-            --auth-mode login \
-            --as-user \
-            --https-only \
-            -o tsv)
-
-          echo "::add-mask::$SAS"
-          echo "sas=?$SAS" >> "$GITHUB_OUTPUT"
-
-      - name: Compute artifacts URL
-        id: urls
-        run: |
-          URL="https://${ARTIFACTS_STORAGE_ACCOUNT}.blob.core.windows.net/${ARTIFACTS_CONTAINER}/"
-          echo "artifacts_location=$URL" >> "$GITHUB_OUTPUT"
+          $ErrorActionPreference = 'Stop'
+          $result = ./scripts/Publish-DscArtifact.ps1 `
+              -StorageAccount $env:ARTIFACTS_STORAGE_ACCOUNT `
+              -Container      $env:ARTIFACTS_CONTAINER
+          # Mask the SAS in logs before exporting it as a job output.
+          Write-Host "::add-mask::$($result.ArtifactsSas)"
+          "artifacts_location=$($result.ArtifactsLocation)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "sas=$($result.ArtifactsSas)"                     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
   pre-deploy-checks:
     name: Pre-deploy Infra Checks

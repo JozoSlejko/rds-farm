@@ -6,6 +6,16 @@ A staged set of checks: **(1)** template sanity before you deploy, **(2)** Azure
 
 ## 1. Pre-deployment (no resources touched)
 
+> [!TIP]
+> **Scripted shortcut.** [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) bundles all of (a), (b), (c) below with extra checks — VNet/subnet capacity (does the subnet have enough free IPs for `sessionHostCount + 2`?), Key Vault cert exists with `exportable: true` and 30+ days to expiry, SAS reachability (`HEAD` on `artifactsLocation + Configuration.zip?<SAS>`), `az deployment group validate`, and chains [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1):
+>
+> ```powershell
+> ./tests/Test-PreDeployReadiness.ps1
+> # Exits 1 on any FAIL; prints PASS/WARN/FAIL per check.
+> ```
+>
+> This is the local equivalent of the `pre-deploy-checks` job in [`deploy.yml`](../.github/workflows/deploy.yml) — run it before every manual deploy.
+
 ```powershell
 # a) Template compiles
 az bicep build --file main.bicep
@@ -151,4 +161,4 @@ The three test PowerShell scripts also run standalone:
 ./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg
 ```
 
-For pull requests against `main`, the gate is `lint` → `config-tests` → `prereqs` (what-if) → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if`. Nothing in the live environment is changed.
+For pull requests against `main`, the gate is `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if`. The `prereqs` job is workflow_dispatch-only — see [CI/CD → trigger table](./ci-cd.md). Nothing in the live environment is changed.

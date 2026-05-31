@@ -1,0 +1,7 @@
+{
+  // Default markdownlint config for this repo. Disables the 80-char line
+  // length rule (MD013) because the docs include tables and prose that read
+  // better as long lines. All other default rules remain enabled.
+  "default": true,
+  "MD013": false
+}

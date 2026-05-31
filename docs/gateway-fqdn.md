@@ -40,6 +40,21 @@ Common choices:
 
 The Bicep deploy outputs `gatewayFqdn` — this is the target of your CNAME. **Deploy once first** to get it, then create the DNS record:
 
+> [!TIP]
+> **Scripted shortcut for Azure DNS.** [`scripts/Set-GatewayCname.ps1`](../scripts/Set-GatewayCname.ps1) reads `gatewayFqdn` from the deployment outputs automatically, auto-discovers the zone's resource group, and upserts the CNAME idempotently:
+>
+> ```powershell
+> # Auto-discover everything from the contoso.com zone + main deployment in rds-farm-rg
+> ./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds
+>
+> # Pin to a specific zone RG / different farm RG / explicit target, and probe RDWeb after
+> ./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds `
+>   -ZoneResourceGroup dns-rg -FarmResourceGroup rds-farm-rg `
+>   -Target contoso-rds.westeurope.cloudapp.azure.com -Verify
+> ```
+>
+> If your zone lives in Cloudflare, GoDaddy, Route 53, etc., create the record manually as shown below.
+
 ```powershell
 # 1) Grab the LB FQDN from deploy outputs
 $target = az deployment group show -g rds-farm-rg -n main `

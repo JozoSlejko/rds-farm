@@ -4,6 +4,19 @@
 
 This guide walks a manual (non-CI) deployment. For automated GitHub Actions deploys, see [CI/CD with GitHub Actions](./ci-cd.md).
 
+> [!TIP]
+> **One-command shortcut.** [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1) bundles steps 1, 4 (`what-if`), and 4 (`create`) into a single call:
+>
+> ```powershell
+> # Preview only
+> ./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount contosoartifactssa
+>
+> # Apply
+> ./scripts/Invoke-ManualDeploy.ps1 -Action deploy   -StorageAccount contosoartifactssa
+> ```
+>
+> The wrapper packages `dsc/Configuration.ps1` via [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1), mints a user-delegation SAS, sets `ARTIFACTS_SAS`/`ARTIFACTS_STORAGE_ACCOUNT` for the process, prompts for `DOMAIN_JOIN_PASSWORD`/`LOCAL_ADMIN_PASSWORD` if missing, and runs `az deployment group what-if` (always) and `az deployment group create` (when `-Action deploy`). The sections below remain the canonical reference for what each step does under the hood.
+
 ## 1. Package and upload DSC artifacts
 
 ```powershell
@@ -90,3 +103,17 @@ Even after a successful deployment, these items live outside the template and ne
      -CollectionName 'DesktopCollection' `
      -ConnectionBroker 'rds-cb-01.contoso.local'
    ```
+
+## Cleanup
+
+To remove the farm (and optionally the artifacts / security resource groups created by `prereqs/`), use:
+
+```powershell
+# Remove the farm RG only (interactive 'yes' prompt)
+./scripts/Remove-RdsFarm.ps1
+
+# Also remove the artifacts RG and skip prompts (CI)
+./scripts/Remove-RdsFarm.ps1 -IncludeArtifactsRg -Force
+```
+
+The script enumerates resources, warns about Key Vaults with purge protection enabled, and uses `az group delete --no-wait`. Track progress with `az group show -n rds-farm-rg`.

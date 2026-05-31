@@ -48,6 +48,27 @@ az role assignment create `
 
 Choose **one** of the three options below.
 
+> [!TIP]
+> **Scripted shortcut.** [`scripts/New-RdsCertificate.ps1`](../scripts/New-RdsCertificate.ps1) wraps all three options and enforces the policy invariants (`exportable: true`, RSA 2048, EKU Server Authentication, SAN = your `Fqdn`):
+>
+> ```powershell
+> # Option A — CSR
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv -CertName rds-tls -Fqdn rds.contoso.com -Mode Csr
+> # …submit rds-tls.csr to your CA, then:
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv -CertName rds-tls -MergeSignedCert .\rds-tls.cer
+>
+> # Option B — import existing PFX (prompts for password securely)
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv -CertName rds-tls -Fqdn rds.contoso.com -Mode ImportPfx -PfxPath .\rds-tls.pfx
+>
+> # Option C — self-signed (lab only)
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv -CertName rds-tls -Fqdn rds.contoso.com -Mode SelfSigned
+>
+> # Optional: also patch main.bicepparam (keyVaultName, keyVaultCertSecretUri, certificateSubject, publicGatewayFqdn)
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv -CertName rds-tls -Fqdn rds.contoso.com -Mode SelfSigned -OutputBicepParam ../main.bicepparam
+> ```
+>
+> The sections below remain the canonical reference for what each option does.
+
 ### Step 2a. Option A — Generate a CSR in Key Vault, sign with a public CA (recommended for production)
 
 This keeps the private key inside Key Vault and you never see it. Works with any public CA that accepts a CSR.
@@ -161,6 +182,20 @@ param keyVaultCertSecretUri    = 'https://contoso-rds-kv.vault.azure.net/secrets
 param publicGatewayFqdn        = 'rds.contoso.com'       // vanity FQDN users type (CNAME → gatewayFqdn)
 param certificateSubject       = 'CN=rds.contoso.com'   // must be a substring of the cert's actual Subject
 ```
+
+> [!TIP]
+> **Scripted shortcut.** [`scripts/Set-BicepParamCertUri.ps1`](../scripts/Set-BicepParamCertUri.ps1) patches these six values in place, takes a `.bak` backup, and validates the result with `az bicep build-params` (restoring on failure):
+>
+> ```powershell
+> ./scripts/Set-BicepParamCertUri.ps1 `
+>   -ParamFile main.bicepparam `
+>   -KeyVaultName contoso-rds-kv `
+>   -KeyVaultResourceGroup security-rg `
+>   -KeyVaultCertSecretUri 'https://contoso-rds-kv.vault.azure.net/secrets/rds-tls' `
+>   -CertificateSubject 'CN=rds.contoso.com' `
+>   -PublicGatewayFqdn rds.contoso.com `
+>   -EnableCertificateBinding $true
+> ```
 
 That's all you need. On deploy, the user-assigned MI gets `Key Vault Secrets User` on the vault (via `kv-role.bicep`), the **Key Vault VM extension** on every RDS VM polls `keyVaultCertSecretUri` every hour and installs the cert into `LocalMachine\My` with its private key intact, and the broker DSC's `BindRDSCertificates` finds it by `certificateSubject` and binds it to all four RDS roles.
 

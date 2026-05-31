@@ -22,6 +22,44 @@ This template replaces the legacy [`Azure/RDS-Templates`](https://github.com/Azu
 
 ---
 
+## 🚀 How to deploy — three tiers
+
+The end-to-end flow splits into three tiers. Tier 0 runs **once** from a human's laptop; Tier 1 is the **pipeline** (re-runnable for every change); Tier 2 is **post-deploy** scripts you reach for as needed.
+
+```mermaid
+flowchart LR
+    subgraph T0["Tier 0 — One-time bootstrap (laptop)"]
+        direction TB
+        BS["scripts/Initialize-CiPrerequisites.ps1<br/>(auto-runs Test-CiPrerequisites at the end)"]
+        CERT["scripts/New-RdsCertificate.ps1<br/>+ Set-BicepParamCertUri.ps1<br/>(cert + main.bicepparam)"]
+    end
+    subgraph T1["Tier 1 — GitHub Actions pipeline"]
+        direction TB
+        WF[".github/workflows/deploy.yml<br/>lint + tests + prereqs + DSC upload<br/>+ what-if + deploy + post-deploy health"]
+    end
+    subgraph T2["Tier 2 — Post-deploy / ops (laptop, ad-hoc)"]
+        direction TB
+        DNS["scripts/Set-GatewayCname.ps1<br/>(vanity-FQDN deploys, Azure DNS)"]
+        RM["scripts/Remove-RdsFarm.ps1<br/>(tear-down)"]
+        LOCAL["scripts/Invoke-ManualDeploy.ps1<br/>(deploy without the pipeline)"]
+    end
+
+    T0 --> T1 --> T2
+```
+
+| Tier | Trigger | Lives where | What runs |
+| --- | --- | --- | --- |
+| **Tier 0 — bootstrap** | You, one time | Your laptop | [`scripts/Initialize-CiPrerequisites.ps1`](scripts/Initialize-CiPrerequisites.ps1) — creates Entra app + federated creds + RBAC + GitHub secrets/variables/environments, then auto-runs [`tests/Test-CiPrerequisites.ps1`](tests/Test-CiPrerequisites.ps1) as a self-check. **Cert setup** is also Tier 0: [`scripts/New-RdsCertificate.ps1`](scripts/New-RdsCertificate.ps1) + [`scripts/Set-BicepParamCertUri.ps1`](scripts/Set-BicepParamCertUri.ps1) (human-gated — CSR submission, private-key custody). |
+| **Tier 1 — pipeline** | `git push` / `workflow_dispatch` | [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) | Lint → `tests/Test-DscConfiguration.ps1` → `tests/Test-BicepParamValues.ps1` → optional `prereqs` deploy → [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) (zip + upload + mint SAS) → pre-deploy infra checks → `what-if` → (on `main`) deploy → `tests/Test-PostDeployHealth.ps1`. **Re-runnable** for every code change. |
+| **Tier 2 — ops** | You, ad-hoc | Your laptop | [`scripts/Set-GatewayCname.ps1`](scripts/Set-GatewayCname.ps1) (vanity CNAME in Azure DNS, post first deploy), [`scripts/Remove-RdsFarm.ps1`](scripts/Remove-RdsFarm.ps1) (tear-down). [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) is the **pipeline-free escape hatch** for laptop deploys; [`tests/Test-PreDeployReadiness.ps1`](tests/Test-PreDeployReadiness.ps1) mirrors the pipeline's `pre-deploy-checks` job locally. |
+
+> [!NOTE]
+> **One source of truth.** The pipeline's DSC upload step in Tier 1 calls the **same** [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) that [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) uses locally — so laptop and CI runs cannot drift apart.
+
+The detailed manual checklist below maps every action to its tier and the script (if any) that automates it.
+
+---
+
 ## What it deploys
 
 | Component | Count | Network exposure |
@@ -65,6 +103,8 @@ flowchart TB
 
 > [!IMPORTANT]
 > The template does **not** touch Active Directory, DNS, your CA, GitHub, or Microsoft 365. Everything below is a **you** task. Work through it in order — later items depend on earlier ones.
+>
+> **One-command shortcut:** [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) bundles steps 10, 13, and 14. Other steps have inline `scripts/` callouts.
 
 ### Phase 1 — Active Directory & networking *(before first deploy)*
 
@@ -78,8 +118,8 @@ flowchart TB
 
 - [ ] **6. Pick the gateway hostname strategy.** Vanity CNAME like `rds.contoso.com` (production) or the free Azure LB hostname (lab/dev only). See [Choosing your gateway FQDN](docs/gateway-fqdn.md).
 - [ ] **7. Provision the Key Vault.** Existing or new vault in your subscription with `enableRbacAuthorization = true`. Grant yourself `Key Vault Certificates Officer`. See [Key Vault prep → Step 1](docs/key-vault-cert.md#step-1-make-sure-the-vault-uses-rbac-not-access-policies). *You can let the pipeline create the vault for you — see [Prerequisite resources](docs/prereqs.md).*
-- [ ] **8. Create or import the TLS cert.** Pick Option A (CSR + public CA), Option B (import existing PFX), or Option C (self-signed for lab). **Cert policy MUST be `exportable: true`.** See [Key Vault prep → Step 2](docs/key-vault-cert.md#step-2-create-the-certificate).
-- [ ] **9. Capture the cert's secret URI.** Run `az keyvault certificate show --query sid` and strip the version segment → put into `keyVaultCertSecretUri`. See [Step 3](docs/key-vault-cert.md#step-3-get-the-secret-uri-and-put-it-in-mainbicepparam).
+- [ ] **8. Create or import the TLS cert.** Pick Option A (CSR + public CA), Option B (import existing PFX), or Option C (self-signed for lab). **Cert policy MUST be `exportable: true`.** See [Key Vault prep → Step 2](docs/key-vault-cert.md#step-2-create-the-certificate). *Scripted shortcut:* [`scripts/New-RdsCertificate.ps1`](scripts/New-RdsCertificate.ps1) handles all three modes and enforces `exportable: true`.
+- [ ] **9. Capture the cert's secret URI.** Run `az keyvault certificate show --query sid` and strip the version segment → put into `keyVaultCertSecretUri`. See [Step 3](docs/key-vault-cert.md#step-3-get-the-secret-uri-and-put-it-in-mainbicepparam). *Scripted shortcut:* [`scripts/Set-BicepParamCertUri.ps1`](scripts/Set-BicepParamCertUri.ps1) patches the param file in place (or run `New-RdsCertificate.ps1 -OutputBicepParam main.bicepparam` to chain steps 8 and 9).
 
 ### Phase 3 — Artifacts storage *(before first deploy)*
 
@@ -90,11 +130,11 @@ flowchart TB
 
 - [ ] **12. Fill in `main.bicepparam`.** All required values from [Prerequisites → Parameters reference](docs/prerequisites.md#parameters-reference).
 - [ ] **13. Export deployment secrets in your shell.** `DOMAIN_JOIN_PASSWORD`, `LOCAL_ADMIN_PASSWORD`, `ARTIFACTS_SAS`.
-- [ ] **14. Run the deployment.** `az deployment group create -g rds-farm-rg --parameters main.bicepparam` — full walkthrough in [Deployment](docs/deployment.md). Wall-clock: 25–40 min.
+- [ ] **14. Run the deployment.** `az deployment group create -g rds-farm-rg --parameters main.bicepparam` — full walkthrough in [Deployment](docs/deployment.md). Wall-clock: 25–40 min. *Scripted shortcut:* [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) bundles publish-DSC + what-if + deploy.
 
 ### Phase 5 — After the first deploy
 
-- [ ] **15. Create the public CNAME** *(vanity-FQDN deployments only)*. Point `rds.contoso.com` → `gatewayFqdn` output (TTL 300). See [Gateway FQDN → Step B](docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn).
+- [ ] **15. Create the public CNAME** *(vanity-FQDN deployments only)*. Point `rds.contoso.com` → `gatewayFqdn` output (TTL 300). See [Gateway FQDN → Step B](docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn). *Scripted shortcut for Azure DNS:* [`scripts/Set-GatewayCname.ps1`](scripts/Set-GatewayCname.ps1) reads `gatewayFqdn` from the deployment outputs and upserts the CNAME (use `-Verify` to probe `https://<fqdn>/RDWeb/`).
 - [ ] **16. Install RDS CALs on the broker.** Open *RD Licensing Manager* → Activate Server. The deployment runs in the 120-day grace period until you do this.
 - [ ] **17. Add the broker computer to AD `Terminal Server License Servers` group.** Requires Domain Admin; outside the rights granted to the domain-join service account. Without it the broker can't hand out CALs after grace expires.
 - [ ] **18. Run smoke tests.** Sections 2–4 of [Testing & verification](docs/testing.md#2-post-deployment-azure-side-smoke-tests).
@@ -158,9 +198,19 @@ rds-farm/
 │   ├── ci-cd.md
 │   └── avd-comparison.md
 ├── tests/                      # automated infra + config tests (used by deploy.yml)
-│   ├── Test-DscConfiguration.ps1   # PSScriptAnalyzer + parse + Configuration discovery
-│   ├── Test-BicepParamValues.ps1   # compile main.bicepparam + value-invariant checks
-│   └── Test-PostDeployHealth.ps1   # post-deploy: extensions, RH, LB, DNS, RD Web
+│   ├── Test-DscConfiguration.ps1       # PSScriptAnalyzer + parse + Configuration discovery
+│   ├── Test-BicepParamValues.ps1       # compile main.bicepparam + value-invariant checks
+│   ├── Test-PostDeployHealth.ps1       # post-deploy: extensions, RH, LB, DNS, RD Web
+│   ├── Test-CiPrerequisites.ps1        # verify Initialize-CiPrerequisites.ps1 output (read-only)
+│   └── Test-PreDeployReadiness.ps1     # local equivalent of CI pre-deploy-checks job
+├── scripts/                    # bootstrap + helper scripts
+│   ├── Initialize-CiPrerequisites.ps1  # Tier-0: Entra app + federated creds + RBAC + GitHub secrets
+│   ├── Publish-DscArtifact.ps1         # zip + upload Configuration.zip + mint user-delegation SAS
+│   ├── Invoke-ManualDeploy.ps1         # end-to-end manual deploy wrapper (no CI required)
+│   ├── New-RdsCertificate.ps1          # create/import TLS cert in Key Vault (CSR/PFX/SelfSigned)
+│   ├── Set-BicepParamCertUri.ps1       # patch cert-related params in main.bicepparam in place
+│   ├── Set-GatewayCname.ps1            # set vanity-FQDN CNAME in Azure DNS (idempotent)
+│   └── Remove-RdsFarm.ps1              # tear down farm RG (optional artifacts/security RGs)
 └── .github/workflows/
     └── deploy.yml              # OIDC-based CI/CD with what-if on PR
 ```
