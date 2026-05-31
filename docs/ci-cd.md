@@ -6,19 +6,23 @@ A ready-to-use workflow is provided at [`.github/workflows/deploy.yml`](../.gith
 
 | Trigger | Jobs |
 | --- | --- |
-| Pull request to `main` | `lint` → `package-dsc` → `upload-artifacts` → `what-if` |
-| Push to `main` | `lint` → `package-dsc` → `upload-artifacts` → `deploy` |
+| Pull request to `main` | `lint` → `config-tests` → `prereqs` (what-if) → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if` |
+| Push to `main` | `lint` → `config-tests` → `prereqs` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `deploy` → `post-deploy-tests` |
 | Manual (`workflow_dispatch`) | choose `action` (what-if / deploy) **and** `prereqs_action` (use-existing / what-if / deploy-new) |
 
 The pipeline:
 
-1. Compiles `main.bicep`, `main.bicepparam`, `prereqs/main.bicep`, and `prereqs/main.bicepparam` for linting.
-2. *(Optional)* Runs `az deployment sub what-if`/`create` against [`prereqs/main.bicep`](../prereqs/main.bicep) when `prereqs_action != use-existing` — provisions a fresh Key Vault + DSC storage account. See [Prerequisite resources](./prereqs.md).
-3. Zips `dsc/Configuration.ps1` → `Configuration.zip`.
-4. Uploads the zip to your artifacts storage account using **`--auth-mode login`** (no account keys). Uses the storage account from the prereqs job if it just ran, otherwise the `ARTIFACTS_STORAGE_ACCOUNT` repo variable.
-5. Generates a **user-delegation SAS** (2-hour expiry) and masks it from logs.
-6. Runs `az deployment group what-if` (PRs) or `create` (main).
-7. Posts the gateway FQDN and RD Web URL to the GitHub Actions job summary.
+1. **`lint`** — compiles `main.bicep`, `main.bicepparam`, `prereqs/main.bicep`, and `prereqs/main.bicepparam`.
+2. **`config-tests`** (no Azure) — runs [`actionlint`](https://github.com/rhysd/actionlint), [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2), [`tests/Test-DscConfiguration.ps1`](../tests/Test-DscConfiguration.ps1) (PSScriptAnalyzer + parse + Configuration discovery), and [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1) (no public-internet CIDRs, valid AD DNS IP, valid KV secret URI, hostnames ≤ 15 chars, etc.).
+3. **`prereqs`** *(optional)* — runs `az deployment sub what-if`/`create` against [`prereqs/main.bicep`](../prereqs/main.bicep) when `prereqs_action != use-existing` — provisions a fresh Key Vault + DSC storage account. See [Prerequisite resources](./prereqs.md).
+4. **`package-dsc`** — zips `dsc/Configuration.ps1` → `Configuration.zip`.
+5. **`upload-artifacts`** — uploads the zip to your artifacts storage account using **`--auth-mode login`** (no account keys). Uses the storage account from the prereqs job if it just ran, otherwise the `ARTIFACTS_STORAGE_ACCOUNT` repo variable. Generates a **user-delegation SAS** (2-hour expiry) and masks it from logs.
+6. **`pre-deploy-checks`** (Azure read-only) — verifies the existing VNet/subnet exist and have enough free IPs for the requested `sessionHostCount`, that `AzureBastionSubnet` is present when `deployBastion=true`, that the Key Vault is RBAC-enabled and the cert is exportable + not about to expire (when `enableCertificateBinding=true`), that `Configuration.zip` is reachable via the SAS, and finally runs `az deployment group validate` (this catches RBAC/policy errors that `what-if` masks as `ResourceNotFound`).
+7. **`what-if`** (PRs / manual `what-if`) **or** **`deploy`** (push to `main` / manual `deploy`).
+8. **`post-deploy-tests`** (after `deploy` succeeds) — runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1): every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, DNS resolution, RD Web URL HTTPS 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`).
+9. Posts the gateway FQDN, RD Web URL, and test result to the GitHub Actions job summary.
+
+See [Testing & verification → §5](./testing.md#5-continuous-testing-in-ci) for the full test matrix.
 
 ## One-time setup
 

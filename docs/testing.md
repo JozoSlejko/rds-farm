@@ -130,35 +130,25 @@ Invoke-WebRequest "https://$fqdn/RDWeb/Pages/en-US/login.aspx" -UseBasicParsing 
 
 Finally, launch **Remote Desktop Connection**, set **Advanced → Connect from anywhere → `$fqdn`**, and connect to one of the session hosts. You should land in a desktop session within ~15 s.
 
-## 5. Continuous testing (recommended additions to CI)
+## 5. Continuous testing in CI
 
-The `deploy.yml` workflow already runs `bicep build` + `what-if` on every PR. For a deeper safety net, add a job that runs **after** the `deploy` job on `main`:
+The `.github/workflows/deploy.yml` pipeline runs all of the above automatically, in three layers:
 
-```yaml
-post-deploy-tests:
-  needs: deploy
-  runs-on: ubuntu-latest
-  environment: production
-  steps:
-    - uses: azure/login@v3
-      with:
-        client-id: ${{ secrets.AZURE_CLIENT_ID }}
-        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+| Layer | Job | When | Needs Azure? | What it covers |
+| --- | --- | --- | --- | --- |
+| 1. Config | `lint` + `config-tests` | every push / PR | no | `bicep build`, `bicep build-params`, [`actionlint`](https://github.com/rhysd/actionlint), `markdownlint`, DSC parse + PSScriptAnalyzer (`tests/Test-DscConfiguration.ps1`), bicepparam value invariants (`tests/Test-BicepParamValues.ps1`) |
+| 2. Pre-deploy | `pre-deploy-checks` | after `upload-artifacts`, before `what-if`/`deploy` | yes (read-only) | existing VNet/subnet present + has enough free IPs, Bastion subnet (if `deployBastion=true`), Key Vault is RBAC-enabled and cert is exportable + not expiring, `Configuration.zip` reachable via SAS, `az deployment group validate` (catches RBAC / policy errors that `what-if` masks) |
+| 3. Post-deploy | `post-deploy-tests` | after `deploy` succeeds on `main` | yes | every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, `gatewayFqdn` resolves, `https://<fqdn>/RDWeb/` returns 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`), vanity-CNAME (`publicGatewayFqdn`) resolves to the LB if different from the Azure-issued FQDN (soft-warn) |
 
-    - name: All extensions Succeeded
-      run: |
-        set -euo pipefail
-        BAD=$(az vm extension list \
-          --ids $(az vm list -g "$AZURE_RESOURCE_GROUP" --query "[].id" -o tsv) \
-          --query "[?provisioningState!='Succeeded'].{vm:id, ext:name, state:provisioningState}" -o json)
-        if [ "$BAD" != "[]" ]; then echo "$BAD"; exit 1; fi
+The three test PowerShell scripts also run standalone:
 
-    - name: RD Web reachable
-      run: |
-        FQDN=$(az deployment group show -g "$AZURE_RESOURCE_GROUP" -n main \
-          --query properties.outputs.gatewayFqdn.value -o tsv)
-        curl -sS -o /dev/null -w '%{http_code}\n' "https://$FQDN/RDWeb/" | grep -q '^200$'
+```powershell
+# Layer 1 — local, no Azure
+./tests/Test-DscConfiguration.ps1
+./tests/Test-BicepParamValues.ps1
+
+# Layer 3 — after a deploy, requires az login + RG read access
+./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg
 ```
 
-For pull requests against `main`, the `what-if` job is the test gate; no live RDS environment is changed.
+For pull requests against `main`, the gate is `lint` → `config-tests` → `prereqs` (what-if) → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if`. Nothing in the live environment is changed.

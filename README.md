@@ -158,6 +158,10 @@ rds-farm/
 │   ├── troubleshooting.md
 │   ├── ci-cd.md
 │   └── avd-comparison.md
+├── tests/                      # automated infra + config tests (used by deploy.yml)
+│   ├── Test-DscConfiguration.ps1   # PSScriptAnalyzer + parse + Configuration discovery
+│   ├── Test-BicepParamValues.ps1   # compile main.bicepparam + value-invariant checks
+│   └── Test-PostDeployHealth.ps1   # post-deploy: extensions, RH, LB, DNS, RD Web
 └── .github/workflows/
     └── deploy.yml              # OIDC-based CI/CD with what-if on PR
 ```

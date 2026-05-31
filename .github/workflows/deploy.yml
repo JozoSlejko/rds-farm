@@ -72,10 +72,41 @@ jobs:
       - name: Bicep build-params (prereqs)
         run: bicep build-params "$PREREQS_BICEPPARAM_FILE"
 
+  config-tests:
+    name: Config Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: actionlint (workflow syntax + script lint)
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+
+      - name: markdownlint (README + docs)
+        uses: DavidAnson/markdownlint-cli2-action@v23
+        with:
+          globs: |
+            README.md
+            docs/**/*.md
+
+      - name: DSC config — PSScriptAnalyzer, parse, discovery
+        shell: pwsh
+        run: ./tests/Test-DscConfiguration.ps1
+
+      - name: Bicep param-value sanity (main farm)
+        shell: pwsh
+        env:
+          DOMAIN_JOIN_PASSWORD: dummy-for-validation-only
+          LOCAL_ADMIN_PASSWORD: dummy-for-validation-only
+          ARTIFACTS_SAS: ''
+        run: ./tests/Test-BicepParamValues.ps1
+
   prereqs:
     name: Prereqs (KV + Storage)
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, config-tests]
     if: github.event_name == 'workflow_dispatch' && inputs.prereqs_action != 'use-existing'
     environment: ${{ inputs.prereqs_action == 'deploy-new' && 'production' || 'preview' }}
     outputs:
@@ -147,7 +178,7 @@ jobs:
   package-dsc:
     name: Package DSC
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, config-tests]
     steps:
       - uses: actions/checkout@v4
 
@@ -231,10 +262,162 @@ jobs:
           URL="https://${ARTIFACTS_STORAGE_ACCOUNT}.blob.core.windows.net/${ARTIFACTS_CONTAINER}/"
           echo "artifacts_location=$URL" >> "$GITHUB_OUTPUT"
 
+  pre-deploy-checks:
+    name: Pre-deploy Infra Checks
+    runs-on: ubuntu-latest
+    needs: upload-artifacts
+    # Read-only validation; runs whenever artifacts were uploaded so what-if
+    # and deploy don't waste a slot on a guaranteed-bad config.
+    if: always() && needs.upload-artifacts.result == 'success'
+    environment: preview
+    env:
+      ARTIFACTS_SAS:      ${{ needs.upload-artifacts.outputs.artifacts_sas }}
+      ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group
+        run: az group create -n "$AZURE_RESOURCE_GROUP" -l "$AZURE_LOCATION" -o none
+
+      - name: Resolve existing infra params from bicepparam
+        id: params
+        env:
+          DOMAIN_JOIN_PASSWORD: dummy-for-validation-only
+          LOCAL_ADMIN_PASSWORD: dummy-for-validation-only
+        run: |
+          set -euo pipefail
+          # Resolve param values without exposing the compiled file path beyond this step.
+          TMP=$(mktemp)
+          az bicep build-params --file "$BICEPPARAM_FILE" --outfile "$TMP" >/dev/null
+          jqv() { jq -r --arg n "$1" '.parameters[$n].value // empty' "$TMP"; }
+          {
+            echo "vnet=$(jqv existingVnetName)"
+            echo "vnet_rg=$(jqv existingVnetResourceGroup)"
+            echo "subnet=$(jqv existingRdsSubnetName)"
+            echo "cert_binding=$(jqv enableCertificateBinding)"
+            echo "kv_name=$(jqv keyVaultName)"
+            echo "kv_rg=$(jqv keyVaultResourceGroup)"
+            echo "kv_secret_uri=$(jqv keyVaultCertSecretUri)"
+            echo "deploy_bastion=$(jqv deployBastion)"
+            echo "bastion_subnet=$(jqv bastionSubnetName)"
+            echo "session_count=$(jqv sessionHostCount)"
+          } >> "$GITHUB_OUTPUT"
+          rm -f "$TMP"
+
+      - name: Existing VNet + subnet present and usable
+        env:
+          VNET:           ${{ steps.params.outputs.vnet }}
+          VNET_RG:        ${{ steps.params.outputs.vnet_rg }}
+          SUBNET:         ${{ steps.params.outputs.subnet }}
+          DEPLOY_BASTION: ${{ steps.params.outputs.deploy_bastion }}
+          BASTION_SUBNET: ${{ steps.params.outputs.bastion_subnet }}
+          SESSION_COUNT:  ${{ steps.params.outputs.session_count }}
+        run: |
+          set -euo pipefail
+
+          if ! az network vnet show -g "$VNET_RG" -n "$VNET" -o none 2>/dev/null; then
+            echo "::error::VNet $VNET_RG/$VNET not found"; exit 1
+          fi
+          echo "[OK] VNet $VNET_RG/$VNET exists"
+
+          SUBNET_JSON=$(az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET" -n "$SUBNET" -o json 2>/dev/null || true)
+          if [ -z "$SUBNET_JSON" ]; then
+            echo "::error::Subnet $SUBNET not found in $VNET"; exit 1
+          fi
+          CIDR=$(echo "$SUBNET_JSON" | jq -r '.addressPrefix // (.addressPrefixes[0])')
+          PFX=${CIDR##*/}
+          # Available IPs = 2^(32-prefix) - 5 (Azure reserves 5 per subnet)
+          AVAILABLE=$(( (1 << (32 - PFX)) - 5 ))
+          # Need: gateway + broker + sessionHostCount
+          NEEDED=$(( 2 + SESSION_COUNT ))
+          echo "[OK] Subnet $SUBNET ($CIDR) has ~$AVAILABLE usable IPs; need $NEEDED"
+          if [ "$AVAILABLE" -lt "$NEEDED" ]; then
+            echo "::error::Subnet too small: $AVAILABLE usable vs $NEEDED needed"; exit 1
+          fi
+
+          if [ "$DEPLOY_BASTION" = "true" ]; then
+            if ! az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET" -n "$BASTION_SUBNET" -o none 2>/dev/null; then
+              echo "::error::deployBastion=true but $BASTION_SUBNET not present in $VNET"; exit 1
+            fi
+            echo "[OK] $BASTION_SUBNET present"
+          fi
+
+      - name: Key Vault + cert reachable (if cert binding enabled)
+        if: steps.params.outputs.cert_binding == 'true' || steps.params.outputs.cert_binding == 'True'
+        env:
+          KV:         ${{ steps.params.outputs.kv_name }}
+          KV_RG:      ${{ steps.params.outputs.kv_rg }}
+          SECRET_URI: ${{ steps.params.outputs.kv_secret_uri }}
+        run: |
+          set -euo pipefail
+
+          KV_JSON=$(az keyvault show -g "$KV_RG" -n "$KV" -o json 2>/dev/null || true)
+          if [ -z "$KV_JSON" ]; then
+            echo "::error::Key Vault $KV_RG/$KV not found"; exit 1
+          fi
+          if [ "$(echo "$KV_JSON" | jq -r '.properties.enableRbacAuthorization')" != "true" ]; then
+            echo "::error::Key Vault $KV is in access-policy mode; switch to RBAC (enableRbacAuthorization=true)"; exit 1
+          fi
+          echo "[OK] Key Vault $KV is RBAC-enabled"
+
+          CERT_NAME=$(echo "$SECRET_URI" | awk -F/ '{print $5}')
+          POLICY=$(az keyvault certificate show-policy --vault-name "$KV" --name "$CERT_NAME" -o json 2>/dev/null || true)
+          if [ -z "$POLICY" ]; then
+            echo "::error::Certificate '$CERT_NAME' not found in $KV (from $SECRET_URI)"; exit 1
+          fi
+          EXPORTABLE=$(echo "$POLICY" | jq -r '.keyProperties.exportable')
+          if [ "$EXPORTABLE" != "true" ]; then
+            echo "::error::Cert '$CERT_NAME' policy has exportable=$EXPORTABLE; DSC needs it true. Re-issue with exportable key material."; exit 1
+          fi
+          echo "[OK] Cert '$CERT_NAME' exists and is exportable"
+
+          EXPIRY=$(az keyvault certificate show --vault-name "$KV" --name "$CERT_NAME" --query attributes.expires -o tsv)
+          NOW=$(date -u +%s)
+          EXP=$(date -u -d "$EXPIRY" +%s)
+          DAYS_LEFT=$(( (EXP - NOW) / 86400 ))
+          echo "[OK] Cert valid until $EXPIRY ($DAYS_LEFT days)"
+          if [ "$DAYS_LEFT" -lt 30 ]; then
+            echo "::warning::Cert expires in $DAYS_LEFT days; consider renewing soon"
+          fi
+
+      - name: Artifacts blob reachable via SAS
+        run: |
+          set -euo pipefail
+          URL="${ARTIFACTS_LOCATION}Configuration.zip${ARTIFACTS_SAS}"
+          # -I HEAD; mask the SAS in the curl output
+          HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I "$URL")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Configuration.zip not reachable via SAS (HTTP $HTTP_CODE)"; exit 1
+          fi
+          echo "[OK] Configuration.zip reachable via SAS (HTTP $HTTP_CODE)"
+
+      - name: ARM template validate
+        env:
+          DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
+          LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # `validate` checks RBAC + policy + template correctness more strictly
+          # than `what-if` (which can mask some errors as ResourceNotFound).
+          az deployment group validate \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file  "$BICEP_FILE" \
+            --parameters     "$BICEPPARAM_FILE" \
+            --parameters     artifactsLocation="$ARTIFACTS_LOCATION" \
+            -o none
+          echo "[OK] Bicep template validates against current state"
+
   what-if:
     name: What-If
     runs-on: ubuntu-latest
-    needs: upload-artifacts
+    needs: [upload-artifacts, pre-deploy-checks]
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.action == 'what-if')
     environment: preview
     steps:
@@ -267,7 +450,7 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    needs: upload-artifacts
+    needs: [upload-artifacts, pre-deploy-checks]
     if: |
       (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
       || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -313,3 +496,35 @@ jobs:
             echo "- Gateway FQDN: \`$FQDN\`"
             echo "- RD Web URL:   $URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  post-deploy-tests:
+    name: Post-deploy Infra Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run post-deploy health tests
+        shell: pwsh
+        run: ./tests/Test-PostDeployHealth.ps1 -ResourceGroupName $env:AZURE_RESOURCE_GROUP
+
+      - name: Append result to job summary
+        if: always()
+        run: |
+          {
+            echo "## Post-deploy infra tests"
+            echo ""
+            echo "Status: \`${{ job.status }}\`"
+            echo ""
+            echo "See [docs/testing.md](../../docs/testing.md) for the manual checklist."
+          } >> "$GITHUB_STEP_SUMMARY"
+
