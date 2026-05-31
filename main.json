@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "existingVnetName": {
+      "value": "corp-vnet"
+    },
+    "existingVnetResourceGroup": {
+      "value": "network-rg"
+    },
+    "existingRdsSubnetName": {
+      "value": "snet-rds"
+    },
+    "adDomainName": {
+      "value": "contoso.local"
+    },
+    "adDnsServerIp": {
+      "value": "10.10.0.4"
+    },
+    "domainJoinUserName": {
+      "value": "svc-domainjoin"
+    },
+    "domainJoinPassword": {
+      "value": "dummy"
+    },
+    "localAdminUserName": {
+      "value": "rdsadmin"
+    },
+    "localAdminPassword": {
+      "value": "dummy"
+    },
+    "sessionHostCount": {
+      "value": 2
+    },
+    "vmSize": {
+      "value": "Standard_D4s_v5"
+    },
+    "windowsSku": {
+      "value": "2022-datacenter-azure-edition"
+    },
+    "allowedClientSourceAddressPrefixes": {
+      "value": [
+        "203.0.113.0/24",
+        "198.51.100.10/32"
+      ]
+    },
+    "gatewayDnsLabelPrefix": {
+      "value": "contoso-rds"
+    },
+    "deployBastion": {
+      "value": true
+    },
+    "artifactsLocation": {
+      "value": "https://contosoartifactssa.blob.core.windows.net/dsc/"
+    },
+    "artifactsLocationSasToken": {
+      "value": ""
+    },
+    "sessionHostNamingPrefix": {
+      "value": "rds-sh-"
+    },
+    "collectionName": {
+      "value": "DesktopCollection"
+    },
+    "rdsAccessGroup": {
+      "value": "Domain Users"
+    },
+    "enableCertificateBinding": {
+      "value": true
+    },
+    "keyVaultName": {
+      "value": "contoso-rds-kv"
+    },
+    "keyVaultResourceGroup": {
+      "value": "security-rg"
+    },
+    "keyVaultCertSecretUri": {
+      "value": "https://contoso-rds-kv.vault.azure.net/secrets/rds-tls"
+    },
+    "publicGatewayFqdn": {
+      "value": "rds.contoso.com"
+    },
+    "certificateSubject": {
+      "value": "CN=rds.contoso.com"
+    }
+  }
+}

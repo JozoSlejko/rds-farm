@@ -1,0 +1,221 @@
+name: Deploy RDS Farm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.bicep'
+      - '**.bicepparam'
+      - 'dsc/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.bicep'
+      - '**.bicepparam'
+      - 'dsc/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'what-if or deploy'
+        type: choice
+        options: [what-if, deploy]
+        default: what-if
+
+permissions:
+  id-token: write   # OIDC federated credential
+  contents: read
+  pull-requests: write
+
+env:
+  AZURE_LOCATION: westeurope
+  AZURE_RESOURCE_GROUP: rds-farm-rg
+  ARTIFACTS_CONTAINER: dsc
+  BICEP_FILE: main.bicep
+  BICEPPARAM_FILE: main.bicepparam
+
+jobs:
+  lint:
+    name: Lint Bicep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bicep CLI
+        run: |
+          curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x bicep
+          sudo mv bicep /usr/local/bin/bicep
+          bicep --version
+
+      - name: Bicep build
+        run: bicep build "$BICEP_FILE"
+
+      - name: Bicep build-params
+        env:
+          DOMAIN_JOIN_PASSWORD: dummy-for-lint-only
+          LOCAL_ADMIN_PASSWORD: dummy-for-lint-only
+          ARTIFACTS_SAS: ''
+        run: bicep build-params "$BICEPPARAM_FILE"
+
+  package-dsc:
+    name: Package DSC
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip DSC configuration
+        run: |
+          cd dsc
+          zip -r ../Configuration.zip Configuration.ps1
+          unzip -l ../Configuration.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsc-configuration
+          path: Configuration.zip
+          retention-days: 7
+
+  upload-artifacts:
+    name: Upload DSC to storage
+    runs-on: ubuntu-latest
+    needs: package-dsc
+    environment: ${{ github.event_name == 'pull_request' && 'preview' || 'production' }}
+    env:
+      ARTIFACTS_STORAGE_ACCOUNT: ${{ vars.ARTIFACTS_STORAGE_ACCOUNT }}
+    outputs:
+      artifacts_location: ${{ steps.urls.outputs.artifacts_location }}
+      artifacts_sas: ${{ steps.sas.outputs.sas }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsc-configuration
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload Configuration.zip
+        run: |
+          az storage blob upload \
+            --account-name "$ARTIFACTS_STORAGE_ACCOUNT" \
+            --container-name "$ARTIFACTS_CONTAINER" \
+            --name Configuration.zip \
+            --file Configuration.zip \
+            --overwrite \
+            --auth-mode login
+
+      - name: Generate short-lived user-delegation SAS
+        id: sas
+        run: |
+          set -euo pipefail
+          EXPIRY=$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%MZ')
+
+          SAS=$(az storage blob generate-sas \
+            --account-name "$ARTIFACTS_STORAGE_ACCOUNT" \
+            --container-name "$ARTIFACTS_CONTAINER" \
+            --name Configuration.zip \
+            --permissions r \
+            --expiry "$EXPIRY" \
+            --auth-mode login \
+            --as-user \
+            --https-only \
+            -o tsv)
+
+          echo "::add-mask::$SAS"
+          echo "sas=?$SAS" >> "$GITHUB_OUTPUT"
+
+      - name: Compute artifacts URL
+        id: urls
+        run: |
+          URL="https://${ARTIFACTS_STORAGE_ACCOUNT}.blob.core.windows.net/${ARTIFACTS_CONTAINER}/"
+          echo "artifacts_location=$URL" >> "$GITHUB_OUTPUT"
+
+  what-if:
+    name: What-If
+    runs-on: ubuntu-latest
+    needs: upload-artifacts
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.action == 'what-if')
+    environment: preview
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group
+        run: |
+          az group create -n "$AZURE_RESOURCE_GROUP" -l "$AZURE_LOCATION" -o none
+
+      - name: Bicep what-if
+        env:
+          DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
+          LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
+          ARTIFACTS_SAS: ${{ needs.upload-artifacts.outputs.artifacts_sas }}
+          ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
+        run: |
+          az deployment group what-if \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file  "$BICEP_FILE" \
+            --parameters     "$BICEPPARAM_FILE" \
+            --parameters     artifactsLocation="$ARTIFACTS_LOCATION"
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: upload-artifacts
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group
+        run: |
+          az group create -n "$AZURE_RESOURCE_GROUP" -l "$AZURE_LOCATION" -o none
+
+      - name: Deploy Bicep
+        id: deploy
+        env:
+          DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
+          LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
+          ARTIFACTS_SAS: ${{ needs.upload-artifacts.outputs.artifacts_sas }}
+          ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
+        run: |
+          set -euo pipefail
+          OUTPUTS=$(az deployment group create \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file  "$BICEP_FILE" \
+            --parameters     "$BICEPPARAM_FILE" \
+            --parameters     artifactsLocation="$ARTIFACTS_LOCATION" \
+            --query properties.outputs -o json)
+
+          echo "$OUTPUTS"
+
+          FQDN=$(echo "$OUTPUTS" | jq -r '.gatewayFqdn.value')
+          URL=$(echo  "$OUTPUTS" | jq -r '.rdWebUrl.value')
+
+          {
+            echo "## RDS Farm Deployed"
+            echo ""
+            echo "- Gateway FQDN: \`$FQDN\`"
+            echo "- RD Web URL:   $URL"
+          } >> "$GITHUB_STEP_SUMMARY"
