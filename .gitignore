@@ -1,0 +1,4 @@
+# Bicep build artifacts (compiled ARM templates / parameter files)
+main.json
+**/main.json
+*.bicepparam.json
