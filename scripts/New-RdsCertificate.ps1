@@ -3,7 +3,7 @@
     Create or import the TLS certificate for the RDS gateway in Key Vault.
 
 .DESCRIPTION
-    Automates the three flows in docs/key-vault-cert.md Step 2:
+    Automates the three flows in docs/manual-deploy.md Step 3:
       * Csr         — generate a CSR in Key Vault for a public CA to sign
                       (Option A). Writes the CSR to .csr file for you to
                       submit. Run again with -MergeSignedCert <file.cer>

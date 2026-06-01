@@ -25,6 +25,9 @@ param domainJoinUserName string
 @description('Domain-join admin password.')
 param domainJoinPassword string
 
+@description('Optional. Distinguished Name of the OU to join the RDS VMs into (e.g. "OU=RDS,OU=Servers,DC=contoso,DC=local"). The domain-join service account needs delegated rights to create/join machine objects in that OU. Leave empty to use the default Computers container.')
+param domainJoinOuPath string = ''
+
 @description('Local admin username for the VMs.')
 param localAdminUserName string
 
@@ -166,6 +169,7 @@ module gatewayVm 'modules/vm.bicep' = {
     localAdminPassword: localAdminPassword
     domainJoinUserName: domainJoinUserName
     domainJoinPassword: domainJoinPassword
+    domainJoinOuPath: domainJoinOuPath
     adDomainName: adDomainName
     zone: availabilityZones[0]
     tags: tags
@@ -189,6 +193,7 @@ module brokerVm 'modules/vm.bicep' = {
     localAdminPassword: localAdminPassword
     domainJoinUserName: domainJoinUserName
     domainJoinPassword: domainJoinPassword
+    domainJoinOuPath: domainJoinOuPath
     adDomainName: adDomainName
     zone: availabilityZones[1]
     tags: tags
@@ -213,6 +218,7 @@ module sessionHosts 'modules/vm.bicep' = [for i in range(0, sessionHostCount): {
     localAdminPassword: localAdminPassword
     domainJoinUserName: domainJoinUserName
     domainJoinPassword: domainJoinPassword
+    domainJoinOuPath: domainJoinOuPath
     adDomainName: adDomainName
     zone: availabilityZones[i % length(availabilityZones)]
     tags: tags

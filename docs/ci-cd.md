@@ -5,7 +5,7 @@
 > [!NOTE]
 > **Where this fits in the tier model.** Everything on this page is either **Tier 0** (the one-time bootstrap — normally driven by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)) or **Tier 1** (the pipeline itself — runs in GitHub Actions on every push/PR). See [README → Deployment guide](../README.md#deployment-guide).
 >
-> **What `main.bicepparam` values does the pipeline auto-supply?** Four: `domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken` (all via `readEnvironmentVariable(...)`), and `artifactsLocation` (via `--parameters` override from the `upload-artifacts` job output). See [Parameters reference](./parameters-reference.md) for the full per-parameter source.
+> **What `main.bicepparam` values does the pipeline auto-supply?** Four: `domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken` (all via `readEnvironmentVariable(...)`), and `artifactsLocation` (via `--parameters` override from the `upload-artifacts` job output). See [README → Parameters reference](../README.md#parameters-reference-mainbicepparam) for the full per-parameter source.
 
 A ready-to-use workflow is provided at [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It uses **OIDC federated credentials** (no client secrets stored in GitHub) and runs:
 

@@ -118,6 +118,6 @@ You can pre-create the two resource groups out of band and grant the deployer on
    gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo '<org>/<repo>' --body '<new-sa-name>'
    ```
 
-2. **Create or import the TLS cert.** Follow [Key Vault prep → Step 2](./key-vault-cert.md#step-2-create-the-certificate) — Step 1 (RBAC mode + self-grant Certificates Officer) is already handled by this template.
+2. **Create or import the TLS cert.** Follow [Manual deploy → Step 3](./manual-deploy.md#3-create-the-tls-certificate-in-key-vault-only-if-tier-0-did-not) — Step 3a (RBAC mode + self-grant Certificates Officer) is already handled by this template.
 3. **Update `main.bicepparam`.** Set `keyVaultName`, `keyVaultResourceGroup`, and `keyVaultCertSecretUri` (the value the prereqs job prints in its summary).
 4. **Run the main farm deploy.** Either trigger the workflow with `prereqs_action: use-existing, action: deploy`, or `az deployment group create` manually per [Manual deploy (escape hatch)](./manual-deploy.md).

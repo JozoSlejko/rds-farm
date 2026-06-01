@@ -17,6 +17,10 @@ param domainJoinUserName string
 param domainJoinPassword string
 
 param adDomainName string
+
+@description('Optional. Distinguished Name of the OU to join the VM into (e.g. "OU=RDS,OU=Servers,DC=contoso,DC=local"). Leave empty to use the default Computers container.')
+param domainJoinOuPath string = ''
+
 param zone string
 param tags object
 
@@ -142,12 +146,15 @@ resource domainJoin 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = 
     type: 'JsonADDomainExtension'
     typeHandlerVersion: '1.3'
     autoUpgradeMinorVersion: true
-    settings: {
-      Name: adDomainName
-      User: '${adDomainName}\\${domainJoinUserName}'
-      Restart: 'true'
-      Options: '3'
-    }
+    settings: union(
+      {
+        Name: adDomainName
+        User: '${adDomainName}\\${domainJoinUserName}'
+        Restart: 'true'
+        Options: '3'
+      },
+      empty(domainJoinOuPath) ? {} : { OUPath: domainJoinOuPath }
+    )
     protectedSettings: {
       Password: domainJoinPassword
     }

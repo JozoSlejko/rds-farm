@@ -10,7 +10,7 @@ using 'main.bicep'
 //
 //  See:
 //    - README -> Deployment guide       (start here if new)
-//    - docs/parameters-reference.md     (per-parameter source-of-truth)
+//    - docs/fqdn-and-cert.md          (hostname + cert decisions Tier 0 acts on)
 // =============================================================================
 
 param existingVnetName = 'corp-vnet'
@@ -20,6 +20,13 @@ param adDomainName = 'contoso.local'
 param adDnsServerIp = '10.10.0.4'
 param domainJoinUserName = 'svc-domainjoin'
 param domainJoinPassword = readEnvironmentVariable('DOMAIN_JOIN_PASSWORD')
+
+// Optional OU to drop the VM AD computer objects into, e.g.
+//   'OU=RDS,OU=Servers,DC=contoso,DC=local'
+// Leave empty to use the default Computers container. The domain-join service
+// account must have "Create Computer Objects" delegated on the target OU.
+param domainJoinOuPath = ''
+
 param localAdminUserName = 'rdsadmin'
 param localAdminPassword = readEnvironmentVariable('LOCAL_ADMIN_PASSWORD')
 param sessionHostCount = 2

@@ -19,12 +19,13 @@
 ## Prerequisites — outside this repo's scope
 
 - [ ] **AD DS reachable from the target subnet.** A DC with DNS, LDAP, Kerberos, and SMB reachable from the subnet you'll deploy into.
-- [ ] **Domain-join service account exists in AD.** Pre-created with delegated rights to join machines to the target OU. The password is supplied **once** to Tier 0 (read as `SecureString`, stored only as GitHub repo secret `DOMAIN_JOIN_PASSWORD`).
+- [ ] **Domain-join service account exists in AD.** Pre-created with delegated rights to create / join machine objects in the target OU (or in the default `Computers` container if you don't pass `-DomainJoinOuPath`). The password is supplied **once** to Tier 0 (read as `SecureString`, stored only as GitHub repo secret `DOMAIN_JOIN_PASSWORD`).
+- [ ] **Target OU decided** *(optional)*. If your AD policy disallows the default `Computers` container, decide which OU the new VMs should land in and grant the service account **Create Computer Objects** there. Pass the OU DN as `-DomainJoinOuPath 'OU=RDS,OU=Servers,DC=contoso,DC=local'`.
 - [ ] **AD security group for RDS access exists.** Members of this group can sign in via RD Web + RD Gateway. Use `Domain Users` for a quick lab or a dedicated group like `RDS-Users` for production.
 - [ ] **Target VNet + subnet exist** in Azure. Subnet must route to the DC. Optionally an `AzureBastionSubnet` (/26) if you want `deployBastion = true`.
 - [ ] **Allowed client source CIDRs decided.** Your office/VPN egress IPs only. **Never use `0.0.0.0/0`.**
-- [ ] **Public hostname strategy decided.** Vanity CNAME like `rds.contoso.com` (production — requires a public-CA cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). See [Choosing your gateway FQDN](./gateway-fqdn.md).
-- [ ] **Cert mode decided.** `Csr` (Tier 0 generates a CSR, you submit to your CA, re-run with the signed cert), `ImportPfx` (you already have a `.pfx`), or `SelfSigned` (lab only). See [Key Vault prep](./key-vault-cert.md).
+- [ ] **Public hostname strategy decided.** Vanity CNAME like `rds.contoso.com` (production — requires a public-CA cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md).
+- [ ] **Cert mode decided.** `Csr` (Tier 0 generates a CSR, you submit to your CA, re-run with the signed cert), `ImportPfx` (you already have a `.pfx`), or `SelfSigned` (lab only). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md#decision-2--pick-the-cert-mode).
 
 ### Laptop tooling for Tier 0
 
@@ -81,7 +82,7 @@ The wrapper packages DSC, uploads, mints a 2-hour user-delegation SAS, prompts f
 
 ## Tier 2 — Post-deploy (ad-hoc)
 
-- [ ] **Create the public CNAME** *(vanity-FQDN deployments only)*. Point `<your-fqdn>` → `gatewayFqdn` output (TTL 300). Azure DNS shortcut: [`scripts/Set-GatewayCname.ps1`](../scripts/Set-GatewayCname.ps1) (use `-Verify` to probe `https://<fqdn>/RDWeb/`). Other DNS providers: do it by hand per [Gateway FQDN → Step B](./gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn).
+- [ ] **Create the public CNAME** *(vanity-FQDN deployments only)*. Point `<your-fqdn>` → `gatewayFqdn` output (TTL 300). Azure DNS shortcut: [`scripts/Set-GatewayCname.ps1`](../scripts/Set-GatewayCname.ps1) (use `-Verify` to probe `https://<fqdn>/RDWeb/`). Other DNS providers: do it by hand per [Manual deploy → Step 7a](./manual-deploy.md#7a-public-dns-cname-vanity-fqdn-only).
 - [ ] **Activate RDS license server on the broker.** *RD Licensing Manager → Activate Server* and install your real RDS CALs. The deployment runs in the 120-day per-user grace period until you do this.
 - [ ] **Add the broker computer to AD `Terminal Server License Servers` group.** Requires Domain Admin; outside the rights granted to the domain-join service account. Without it the broker can't hand out CALs after grace expires.
 - [ ] **Run smoke tests.** Sections 2–4 of [Testing & verification](./testing.md#2-post-deployment-azure-side-smoke-tests).
@@ -92,5 +93,7 @@ The wrapper packages DSC, uploads, mints a 2-hour user-delegation SAS, prompts f
 ## See also
 
 - [README → Deployment guide](../README.md#deployment-guide) — prose walkthrough
-- [Parameters reference](./parameters-reference.md) — per-parameter `Source` (file / env var / CI override)
+- [README → Parameters reference](../README.md#parameters-reference-mainbicepparam) — per-parameter `Source` (file / env var / CI override)
+- [Gateway FQDN and TLS certificate](./fqdn-and-cert.md) — the hostname + cert decisions Tier 0 acts on
+- [Manual deploy](./manual-deploy.md) — by-hand procedures when the orchestrator isn't an option
 - [Troubleshooting](./troubleshooting.md) — issues grouped by tier

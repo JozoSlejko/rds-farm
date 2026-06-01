@@ -58,6 +58,13 @@
     sAMAccountName of the pre-created service account that has delegated
     rights to join machines to the target OU. Default: 'svc-domainjoin'.
 
+.PARAMETER DomainJoinOuPath
+    Optional. Distinguished Name of the OU to drop the new RDS VM computer
+    objects into, e.g. 'OU=RDS,OU=Servers,DC=contoso,DC=local'. The
+    -DomainJoinUserName account must have 'Create Computer Objects'
+    delegated on that OU. Leave empty (default) to use the domain's default
+    Computers container.
+
 .PARAMETER LocalAdminUserName
     Local administrator username for the new VMs. Default: 'rdsadmin'.
 
@@ -176,6 +183,7 @@ param(
     [string]$AdDomainName,
     [string]$AdDnsServerIp,
     [string]$DomainJoinUserName = 'svc-domainjoin',
+    [string]$DomainJoinOuPath   = '',
     [string]$LocalAdminUserName = 'rdsadmin',
     [string]$RdsAccessGroup     = 'Domain Users',
 
@@ -440,6 +448,7 @@ Write-Host "    Subscription                 : $($ctx.name)"
 Write-Host "    Location                     : $Location"
 Write-Host "    AD domain / DNS              : $AdDomainName / $AdDnsServerIp"
 Write-Host "    Domain-join account          : $DomainJoinUserName"
+Write-Host "    Domain-join target OU        : $(if ($DomainJoinOuPath) { $DomainJoinOuPath } else { '(default: Computers container)' })"
 Write-Host "    Local admin                  : $LocalAdminUserName"
 Write-Host "    RDS access group             : $RdsAccessGroup"
 Write-Host "    Existing VNet/subnet         : $ExistingVnetResourceGroup/$ExistingVnetName/$ExistingRdsSubnetName"
@@ -628,6 +637,7 @@ $stringPatches = [ordered]@{
     adDomainName              = $AdDomainName
     adDnsServerIp             = $AdDnsServerIp
     domainJoinUserName        = $DomainJoinUserName
+    domainJoinOuPath          = $DomainJoinOuPath
     localAdminUserName        = $LocalAdminUserName
     gatewayDnsLabelPrefix     = $GatewayDnsLabelPrefix
     rdsAccessGroup            = $RdsAccessGroup

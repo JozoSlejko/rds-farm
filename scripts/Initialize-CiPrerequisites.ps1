@@ -23,7 +23,7 @@
     What this script does NOT do (intentional):
       * Create the artifacts storage account / Key Vault / RGs — that is what
         the `prereqs` job in .github/workflows/deploy.yml does.
-      * Create or import the TLS certificate — see docs/key-vault-cert.md.
+      * Create or import the TLS certificate — see docs/fqdn-and-cert.md.
 
 .PARAMETER GitHubRepo
     Format: <org-or-user>/<repo>, e.g. 'contoso/rds-farm'.
@@ -315,7 +315,7 @@ Write-Host "        action         : what-if"
 Write-Host "        prereqs_action : deploy-new"
 Write-Host "  3. After it succeeds, copy the storage account name from the job summary:"
 Write-Host "        gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body <name>"
-Write-Host "  4. Create the TLS certificate in the new Key Vault (docs/key-vault-cert.md)."
+Write-Host "  4. Create the TLS certificate in the new Key Vault (docs/fqdn-and-cert.md)."
 Write-Host "  5. Update main.bicepparam with keyVaultName / keyVaultResourceGroup /"
 Write-Host "     keyVaultCertSecretUri."
 Write-Host "  6. Trigger the workflow with action: deploy."

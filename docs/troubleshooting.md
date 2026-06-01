@@ -15,7 +15,7 @@
 | Pipeline `deploy` job error `AuthorizationFailed: ... does not have authorization to perform action 'Microsoft.Authorization/roleAssignments/write'` | The SP lacks `Role Based Access Control Administrator` on the Key Vault RG. Either grant it (`az role assignment create`) or set `enableCertificateBinding = false` to skip the cross-RG role-assignment module. |
 | Cert in Key Vault, but `BindRDSCertificates` throws `Certificate ... not found` | KV VM extension hasn't synced yet (give it up to 1 h), cert policy isn't `exportable: true`, or `certificateSubject` doesn't match the cert's actual subject. Run `tests/Test-PreDeployReadiness.ps1` to catch this before deploy. |
 | `403` from Key Vault to the VM extension | UAMI doesn't have `Key Vault Secrets User` on the vault, **or** the vault still uses access policies instead of RBAC (`az keyvault update --enable-rbac-authorization true`). |
-| `gateway-fqdn.md` Step B: `az network dns record-set cname set-record` returns `ZoneNotFound` | The zone lives in a different RG than the farm. Pass `-ZoneResourceGroup <dns-rg>` to [`scripts/Set-GatewayCname.ps1`](../scripts/Set-GatewayCname.ps1) or use the CLI's `--resource-group <dns-rg>`. |
+| `manual-deploy.md` Step 7a: `az network dns record-set cname set-record` returns `ZoneNotFound` | The zone lives in a different RG than the farm. Pass `-ZoneResourceGroup <dns-rg>` to [`scripts/Set-GatewayCname.ps1`](../scripts/Set-GatewayCname.ps1) or use the CLI's `--resource-group <dns-rg>`. |
 
 ## Common issues — Tier 1 (Bicep / DSC apply)
 
@@ -31,7 +31,7 @@
 
 | Symptom | Cause / fix |
 | --- | --- |
-| `https://<publicGatewayFqdn>/RDWeb/` doesn't resolve | CNAME not yet created (Step B of [Gateway FQDN](./gateway-fqdn.md)) or TTL hasn't elapsed. |
+| `https://<publicGatewayFqdn>/RDWeb/` doesn't resolve | CNAME not yet created ([Manual deploy → Step 7a](./manual-deploy.md#7a-public-dns-cname-vanity-fqdn-only)) or TTL hasn't elapsed. |
 | Browser warns "the identity of this computer cannot be verified" | Cert SAN doesn't match the FQDN the user typed (Tier 0 cert mismatch), or you're on Option 1 (Azure LB FQDN) with a self-signed cert and haven't pushed it to the client's Trusted Root store. |
 | Health probe shows backend unhealthy | RD Gateway role not finished installing yet (give it ~15 min on first boot), or NSG blocking `AzureLoadBalancer` source tag. |
 | User signed in but lands in the wrong session host pool | `rdsAccessGroup` membership change hasn't propagated. Log off / log on the user; or restart the broker (`Restart-Computer -ComputerName rds-cb-01`). |
@@ -39,7 +39,7 @@
 
 ## See also
 
-- [Choosing your gateway FQDN → Common gotchas](./gateway-fqdn.md#common-gotchas) — DNS / cert mismatch details
+- [Gateway FQDN and TLS certificate → Common gotchas](./fqdn-and-cert.md#common-gotchas) — DNS / cert mismatch details
 - [Testing & verification](./testing.md) — staged smoke tests that catch most failures early
 - [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) — laptop equivalent of the pipeline's `pre-deploy-checks` job
 - [`tests/Test-CiPrerequisites.ps1`](../tests/Test-CiPrerequisites.ps1) — read-only audit of the GitHub Actions + Entra wiring

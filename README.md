@@ -89,13 +89,11 @@ These five items exist before you ever touch this repo. They live in AD, network
 
 | Item | Who creates it | Notes |
 | --- | --- | --- |
-| **AD service account for domain-join** | AD admin | Delegated rights to join machines to the target OU. You'll supply its password to Tier 0 once (stored as the `DOMAIN_JOIN_PASSWORD` GitHub secret). Default sAMAccountName: `svc-domainjoin`. |
+| **AD service account for domain-join** | AD admin | Delegated rights to create / join machine objects in the target OU (or in the default `Computers` container if you don't pass `-DomainJoinOuPath`). You'll supply its password to Tier 0 once (stored as the `DOMAIN_JOIN_PASSWORD` GitHub secret). Default sAMAccountName: `svc-domainjoin`. |
 | **AD security group for RDS access** | AD admin | Members of this group can sign in via RD Web + RD Gateway. Use `Domain Users` for a quick lab; a dedicated group like `RDS-Users` for prod. |
 | **Existing Azure VNet + subnet** | Network admin | Subnet must route to a DC (DNS, LDAP, Kerberos, SMB). Optionally add an `AzureBastionSubnet` (/26) if you want Bastion. |
 | **Allowed client source CIDRs** | You | Office / VPN egress IPs that may reach `TCP 443` + `UDP 3391`. **Never `0.0.0.0/0`.** |
-| **Gateway hostname plan** | You | Vanity CNAME like `rds.contoso.com` (production — requires a public cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). See [`docs/gateway-fqdn.md`](docs/gateway-fqdn.md). |
-
-Full reference with parameter mappings: [`docs/parameters-reference.md`](docs/parameters-reference.md).
+| **Gateway hostname + cert plan** | You | Vanity CNAME like `rds.contoso.com` (production — requires a public-CA cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). Decision rationale + what Tier 0 does for each: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md). |
 
 You also need on your **laptop** for Tier 0: PowerShell 7+, `az` CLI signed in (`az login`), `gh` CLI signed in (`gh auth login --scopes repo`), Owner on the target subscription, and Application Developer in the Entra tenant.
 
@@ -121,11 +119,85 @@ A single script orchestrates everything Tier 0 needs. It calls the focused per-a
 
 Any required value you omit is prompted for interactively (with sensible defaults shown in brackets). Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -CertMode SelfSigned` — the script asks for the rest.
 
-In one pass it wires GitHub Actions, deploys the prereq Azure resources, issues the TLS cert in Key Vault, and writes a fully populated `main.bicepparam`. You don't hand-edit the bicepparam afterwards. Per-step breakdown: [`docs/manual-checklist.md`](docs/manual-checklist.md). Parameter-by-parameter reference: [`docs/parameters-reference.md`](docs/parameters-reference.md).
+In one pass it wires GitHub Actions, deploys the prereq Azure resources, issues the TLS cert in Key Vault, and writes a fully populated `main.bicepparam`. You don't hand-edit the bicepparam afterwards. Per-step breakdown: [`docs/manual-checklist.md`](docs/manual-checklist.md).
+
+#### `Initialize-RdsFarm.ps1` parameters
+
+Required values are marked **yes**. Anything else has a sensible default — omit it and the script uses the default (or prompts when interactive).
+
+| Parameter | Required | Default | Description |
+| --- | --- | --- | --- |
+| `-GitHubRepo` | **yes** | — | `<owner>/<repo>`. Used for OIDC federated credentials and `gh` secret targeting. |
+| `-SubscriptionId` | no | `az account show` | Azure subscription to deploy into. |
+| `-Location` | no | `westeurope` | Region for the prereq RGs / KV / SA and the farm. |
+| `-AdDomainName` | **yes** | — | AD FQDN, e.g. `contoso.local`. |
+| `-AdDnsServerIp` | **yes** | — | IP of a DC the new VMs can reach for DNS. |
+| `-DomainJoinUserName` | no | `svc-domainjoin` | sAMAccountName of the pre-created domain-join service account. |
+| `-DomainJoinOuPath` | no | *empty* → default `Computers` container | DN of the OU to drop the VM computer objects into, e.g. `OU=RDS,OU=Servers,DC=contoso,DC=local`. The `-DomainJoinUserName` account needs **Create Computer Objects** delegated on that OU. |
+| `-LocalAdminUserName` | no | `rdsadmin` | Local admin username on every RDS VM. |
+| `-RdsAccessGroup` | no | `Domain Users` | AD security group whose members may sign in via RD Web + RD Gateway. |
+| `-ExistingVnetName` | **yes** | — | Pre-existing VNet hosting the RDS subnet. |
+| `-ExistingVnetResourceGroup` | **yes** | — | Resource group of the existing VNet. |
+| `-ExistingRdsSubnetName` | **yes** | — | Subnet for the RDS VMs. |
+| `-AllowedClientSourceAddressPrefixes` | **yes** | — | `string[]` of CIDRs allowed to reach TCP 443 / UDP 3391. **Never `0.0.0.0/0`.** |
+| `-PublicGatewayFqdn` | **yes** *(use vanity FQDN; omit only for `*.cloudapp.azure.com` lab path)* | — | Public hostname clients type. Must match the TLS cert Subject / SAN. |
+| `-GatewayDnsLabelPrefix` | no | sanitised `-PublicGatewayFqdn` | DNS label for the Azure-managed PIP hostname. Must be globally unique. |
+| `-ArtifactsStorageAccount` | **yes** | — | Globally unique storage account name (3–24 chars, lowercase alphanumeric) for `Configuration.zip`. |
+| `-KeyVaultName` | **yes** | — | Globally unique Key Vault name (3–24 chars) for the TLS cert. |
+| `-ArtifactsResourceGroup` | no | `rds-artifacts-rg` | RG for the artifacts SA. |
+| `-KeyVaultResourceGroup` | no | `rds-security-rg` | RG for the Key Vault. |
+| `-CertMode` | **yes** | — | `Csr` (production, two-pass) / `ImportPfx` / `SelfSigned`. Full mode comparison: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md). |
+| `-PfxPath` | only when `-CertMode ImportPfx` | — | Path to the existing `.pfx` file. Password prompted as `SecureString`. |
+| `-CertName` | no | `rds-tls` | Name of the cert object in Key Vault. |
+| `-AppDisplayName` | no | `gh-rds-farm-deploy` | Display name for the Entra app the pipeline uses. |
+| `-RequireProductionApproval` | switch | off | Mark the `production` GitHub environment as requiring approval from the current `gh` user. Requires GH Pro/Team/Enterprise on private repos. |
+| `-BicepParamFile` | no | `<repo>/main.bicepparam` | Path to the bicepparam to patch. |
+| `-SkipCiBootstrap` | switch | off | Skip CI wiring (use only when `Initialize-CiPrerequisites.ps1` already ran successfully). |
+| `-SkipPrereqsDeploy` | switch | off | Skip the prereqs Bicep (use only when KV + SA already exist and you pass their names). |
+
+`Get-Help ./scripts/Initialize-RdsFarm.ps1 -Full` shows the same set with extended notes.
 
 **Csr mode is two-pass.** The first run generates a CSR file, then halts before the bicepparam is overwritten with an incomplete cert URI. Submit the CSR to your CA, then re-run `Initialize-RdsFarm.ps1` (or [`scripts/New-RdsCertificate.ps1`](scripts/New-RdsCertificate.ps1) directly with `-MergeSignedCert`) to finish.
 
 **Idempotent.** Re-running is safe: existing Entra apps / RBAC / KV / SA / GH secrets are reused; the bicepparam is re-patched in place (a `.bak` backup is written).
+
+#### Parameters reference (`main.bicepparam`)
+
+The values below are baked into [`main.bicepparam`](main.bicepparam) during Tier 0. This table is the per-parameter source-of-truth: which rows Tier 0 sets for you (`file`), which it leaves as `readEnvironmentVariable(...)` (`env var`), and which the pipeline overrides at run time (`CI override`).
+
+| Source | Meaning |
+| --- | --- |
+| **file** | You (or Tier 0) write the literal value into [`main.bicepparam`](main.bicepparam). Both CI and laptop runs read it as-is. |
+| **env var** | Param uses `readEnvironmentVariable(...)`. CI injects from a GitHub secret; laptop runs use `$env:` (the helper scripts prompt). **Do not put a literal value in the file.** |
+| **CI override** | The pipeline passes `--parameters <name>=<value>` from a previous job's output. The value in the file is only used by laptop runs ([`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) sets it too). |
+
+| Parameter | Required | Source | Description |
+| --- | --- | --- | --- |
+| `existingVnetName`, `existingVnetResourceGroup`, `existingRdsSubnetName` | yes | file | Target VNet / subnet (can be in another RG). |
+| `adDomainName` | yes | file | FQDN of the existing AD domain, e.g. `contoso.local`. |
+| `adDnsServerIp` | yes | file | Private IP of an AD DNS server reachable from the subnet. |
+| `domainJoinUserName` | yes | file | Service account user name for domain join (password below). |
+| `domainJoinPassword` | yes | **env var** | `$env:DOMAIN_JOIN_PASSWORD`. CI secret `DOMAIN_JOIN_PASSWORD` (set by [`scripts/Initialize-CiPrerequisites.ps1`](scripts/Initialize-CiPrerequisites.ps1)). |
+| `domainJoinOuPath` | no (default empty) | file | DN of the target OU (e.g. `OU=RDS,OU=Servers,DC=contoso,DC=local`). Empty = default `CN=Computers` container. |
+| `localAdminUserName` | yes | file | Local admin user name on every VM. |
+| `localAdminPassword` | yes | **env var** | `$env:LOCAL_ADMIN_PASSWORD`. CI secret `LOCAL_ADMIN_PASSWORD`. |
+| `sessionHostCount` | no (default `2`) | file | 1–20 RDSH VMs, spread across `availabilityZones`. |
+| `vmSize` | no (`Standard_D4s_v5`) | file | Used for every RDS VM. |
+| `windowsSku` | no (`2022-datacenter-azure-edition`) | file | Azure Edition recommended (hotpatch capable). |
+| `allowedClientSourceAddressPrefixes` | yes | file | CIDRs allowed to reach 443 / UDP 3391. **Do not use `0.0.0.0/0`.** |
+| `gatewayDnsLabelPrefix` | yes | file | Becomes `<prefix>.<region>.cloudapp.azure.com`. |
+| `deployBastion` | no (`true`) | file | Set `false` if you already have Bastion in a hub VNet. |
+| `availabilityZones` | no (`['1','2','3']`) | file | Reduce if the region has fewer zones. |
+| `artifactsLocation` | yes | **CI override** (file for laptop) | Base URL of the blob container holding `Configuration.zip`. Must end with `/`. Pipeline's `upload-artifacts` job sets this from the SA the `prereqs` job created. |
+| `artifactsLocationSasToken` | when artifacts container is private | **env var** | `$env:ARTIFACTS_SAS`. Pipeline mints a user-delegation SAS via [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) and exports it as a masked job output. |
+| `sessionHostNamingPrefix` | no (`rds-sh-`) | file | Must match what the broker DSC uses to compute FQDNs. |
+| `collectionName` | no | file | RDS session collection name. |
+| `rdsAccessGroup` | no (`Domain Users`) | file | sAMAccountName of the AD security group whose members can sign in to the collection and through the RD Gateway. |
+| `enableCertificateBinding` | no (`false`) | file | Enables the KV → cert binding flow. Tier 0 sets this `true` for any `-CertMode` other than the `Csr` first pass. |
+| `keyVaultName`, `keyVaultResourceGroup` | only if cert binding | file | The KV Tier 0 provisioned (or an existing one). |
+| `keyVaultCertSecretUri` | only if cert binding | file | `https://<vault>.vault.azure.net/secrets/<cert>`. [`scripts/Set-BicepParamCertUri.ps1`](scripts/Set-BicepParamCertUri.ps1) patches it for you. |
+| `publicGatewayFqdn` | only if cert binding (recommended) | file | Public hostname clients type. Wired into RD Gateway's `GatewayExternalFqdn` and the `rdWebUrl` output. Leave empty to use the LB FQDN (lab / dev only — see [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md)). |
+| `certificateSubject` | only if cert binding | file | Subject substring to locate the cert (e.g. `CN=rds.contoso.com`). |
 
 ### Tier 1 — Deploy (pipeline)
 
@@ -169,7 +241,7 @@ After the first successful deploy you need to do four things, **none** of which 
    ./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds -Verify
    ```
 
-   For other DNS providers (Cloudflare, GoDaddy, Route 53…) create the CNAME by hand using [`docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn`](docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn).
+   For other DNS providers (Cloudflare, GoDaddy, Route 53…) create the CNAME by hand using [`docs/manual-deploy.md#7a-public-dns-cname-vanity-fqdn-only`](docs/manual-deploy.md#7a-public-dns-cname-vanity-fqdn-only). Decision rationale: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md).
 2. **Activate the license server** on the broker via *RD Licensing Manager → Activate Server* and install your real RDS CALs. The deploy runs in the 120-day per-user grace period until you do this.
 3. **Add the broker computer to AD `Terminal Server License Servers`** group (requires Domain Admin — outside the rights granted to the domain-join service account).
 4. **Smoke tests.** Run Sections 2–4 of [`docs/testing.md`](docs/testing.md) for an end-to-end client check.
@@ -208,11 +280,9 @@ rds-farm/
 │       └── storage.bicep
 ├── docs/                       # detailed guides linked from the Documentation table below
 │   ├── manual-checklist.md      # printable companion to the Deployment guide
-│   ├── parameters-reference.md  # per-parameter source (file / env var / CI override)
 │   ├── prereq-resources.md      # the prereqs/ Bicep template (KV + storage SA)
-│   ├── gateway-fqdn.md
-│   ├── key-vault-cert.md
-│   ├── manual-deploy.md         # escape-hatch az commands + what the deploy does
+│   ├── fqdn-and-cert.md         # hostname + cert decisions and what Tier 0 does with them
+│   ├── manual-deploy.md         # consolidated by-hand procedures (cert, CNAME, az commands)
 │   ├── ci-cd.md
 │   ├── testing.md
 │   └── troubleshooting.md
@@ -244,11 +314,9 @@ The README above is the deployment guide. For deeper reference on a specific are
 | Guide | Read this when… |
 | --- | --- |
 | [Manual setup checklist](docs/manual-checklist.md) | You want a tickable / printable version of the [Deployment guide](#deployment-guide) above. |
-| [Parameters reference](docs/parameters-reference.md) | You want the per-parameter source-of-truth for `main.bicepparam` (file / env var / CI override). |
 | [Prerequisite resources (Key Vault + storage)](docs/prereq-resources.md) | You want to provision the prereq Key Vault and DSC storage account automatically instead of pre-creating them by hand. |
-| [Choosing your gateway FQDN](docs/gateway-fqdn.md) | Deciding between the free Azure LB hostname (lab only) and a vanity CNAME (production). |
-| [Key Vault prep](docs/key-vault-cert.md) | Setting up the TLS cert for the four RDS roles — vault RBAC, CSR/PFX import/self-signed flows, and renewal. |
-| [Manual deploy (escape hatch)](docs/manual-deploy.md) | What the deployment does end-to-end (12 steps), plus the underlying `az` commands when CI is unavailable. |
+| [Gateway FQDN and TLS certificate](docs/fqdn-and-cert.md) | Deciding the public hostname (Azure LB vs vanity CNAME) and cert mode (Csr / ImportPfx / SelfSigned). Explains what Tier 0 does for each combination. |
+| [Manual deploy (escape hatch)](docs/manual-deploy.md) | What the deployment does end-to-end (12 steps), plus the underlying `az` commands for cert creation, bicepparam editing, deploy, and CNAME — when CI is unavailable. |
 | [CI/CD with GitHub Actions](docs/ci-cd.md) | Wiring up the included `.github/workflows/deploy.yml` (OIDC federated creds, RBAC, env approval). |
 | [Testing & verification](docs/testing.md) | Five-stage smoke tests from pre-deploy `what-if` to end-to-end client RDP. |
 | [Troubleshooting](docs/troubleshooting.md) | "Why doesn't this work?" — failures grouped by tier with the most likely fix. |

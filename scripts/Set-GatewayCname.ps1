@@ -3,7 +3,7 @@
     Create/update the vanity CNAME for the RDS gateway in Azure DNS.
 
 .DESCRIPTION
-    Automates docs/gateway-fqdn.md Step B (Azure-DNS-only path).
+    Automates docs/manual-deploy.md Step 7a (Azure-DNS-only path).
 
     Reads the deployment output `gatewayFqdn` from your `main` deployment,
     then sets a CNAME at <RecordName>.<ZoneName> pointing to it (TTL 300 by

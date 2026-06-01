@@ -39,7 +39,7 @@ After step 12 returns success, opening `https://<publicGatewayFqdn>/RDWeb/` from
 ---
 
 > [!TIP]
-> **One-command shortcut.** [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1) bundles steps 1, 4 (`what-if`), and 4 (`create`) into a single call:
+> **One-command shortcut.** [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1) bundles steps 1, 2, 5 (`what-if`), and 5 (`create`) into a single call:
 >
 > ```powershell
 > # Preview only
@@ -87,7 +87,7 @@ $sas    = az storage blob generate-sas `
 
 ## 2. Set secrets in your shell
 
-These three env vars provide the values for the **four CI-injected `main.bicepparam` parameters** (`domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, plus `artifactsLocation` which we pass via `--parameters` in step 4):
+These three env vars provide the values for the **four CI-injected `main.bicepparam` parameters** (`domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, plus `artifactsLocation` which we pass via `--parameters` in step 5):
 
 ```powershell
 $env:DOMAIN_JOIN_PASSWORD = '<svc-domainjoin password>'
@@ -95,15 +95,200 @@ $env:LOCAL_ADMIN_PASSWORD = '<local admin password>'
 # $env:ARTIFACTS_LOCATION and $env:ARTIFACTS_SAS were set in step 1
 ```
 
-## 3. Edit `main.bicepparam`
+## 3. Create the TLS certificate in Key Vault *(only if Tier 0 did not)*
 
-Set at minimum the values listed in [README → Set these in `main.bicepparam`](../README.md#set-these-in-mainbicepparam-ci-and-laptop-both-read-the-file) (existing VNet, AD config, allowed source IPs, gateway DNS label prefix, cert/FQDN block if `enableCertificateBinding=true`).
+Skip this step entirely if `scripts/Initialize-RdsFarm.ps1` already provisioned the cert (the normal path). It's documented here only for the rare case where you have to do it by hand — e.g. the orchestrator can't run in your environment, or your security team owns cert issuance in a separate workflow.
 
-**Do not** put real values into `domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, or `artifactsLocation` — those come from env vars (step 2) and the `--parameters` override (step 4). Leave them as their `readEnvironmentVariable(...)` defaults.
+> [!TIP]
+> **Scripted shortcut.** [`scripts/New-RdsCertificate.ps1`](../scripts/New-RdsCertificate.ps1) wraps all three modes and enforces the policy invariants (`exportable: true`, RSA 2048, EKU Server Authentication, SAN = your `Fqdn`):
+>
+> ```powershell
+> # Option A — CSR (production)
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv01 -CertName rds-tls -Fqdn rds.contoso.com -Mode Csr
+> # ...submit rds-tls.csr to your CA, then:
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv01 -CertName rds-tls -MergeSignedCert .\rds-tls.cer
+>
+> # Option B — import existing PFX (prompts for password securely)
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv01 -CertName rds-tls -Fqdn rds.contoso.com -Mode ImportPfx -PfxPath .\rds-tls.pfx
+>
+> # Option C — self-signed (lab only)
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv01 -CertName rds-tls -Fqdn rds.contoso.com -Mode SelfSigned
+>
+> # Patch the cert-related params in main.bicepparam in one shot
+> ./scripts/New-RdsCertificate.ps1 -VaultName contoso-rds-kv01 -CertName rds-tls -Fqdn rds.contoso.com `
+>   -Mode SelfSigned -OutputBicepParam ../main.bicepparam
+> ```
+>
+> The verbose `az` recipes below remain the canonical reference for what each mode does. For the **decision** of which mode + hostname to pick, see [Gateway FQDN and TLS certificate](./fqdn-and-cert.md).
 
-Full list: [parameters reference](./parameters-reference.md).
+### 3a. Make sure the vault uses RBAC, not access policies
 
-## 4. Deploy
+`kv-role.bicep` assigns the built-in role `Key Vault Secrets User` (`4633458b-17de-408a-b874-0445c86b69e6`) to the user-assigned identity. This **only works on RBAC-mode vaults**.
+
+```powershell
+# Verify
+az keyvault show -n contoso-rds-kv01 --query "properties.enableRbacAuthorization" -o tsv
+# Expected: true
+
+# If false, switch (this disables all existing access policies)
+az keyvault update -n contoso-rds-kv01 --enable-rbac-authorization true
+```
+
+You also need **Key Vault Certificates Officer** (or higher) on your own user to create / import the cert below:
+
+```powershell
+$me = az ad signed-in-user show --query id -o tsv
+az role assignment create `
+  --assignee $me `
+  --role 'Key Vault Certificates Officer' `
+  --scope (az keyvault show -n contoso-rds-kv01 --query id -o tsv)
+```
+
+### 3b. Generate a CSR in Key Vault, sign with a public CA *(production)*
+
+Keeps the private key inside Key Vault — you never see it. Works with any public CA that accepts a CSR.
+
+```powershell
+$vault    = 'contoso-rds-kv01'
+$certName = 'rds-tls'
+$fqdn     = 'rds.contoso.com'   # your vanity gateway FQDN (matches publicGatewayFqdn)
+
+# 1) Build an exportable policy with the right subject / SAN / EKU
+$policy = az keyvault certificate get-default-policy | ConvertFrom-Json
+$policy.key_props.exportable          = $true
+$policy.key_props.key_type            = 'RSA'
+$policy.key_props.key_size            = 2048
+$policy.key_props.reuse_key           = $false
+$policy.x509_props.subject            = "CN=$fqdn"
+$policy.x509_props.sans               = @{ dns_names = @($fqdn); emails = @(); upns = @() }
+$policy.x509_props.ekus               = @('1.3.6.1.5.5.7.3.1')   # Server Authentication
+$policy.x509_props.validity_in_months = 12
+$policy.issuer_parameters.name        = 'Unknown'                # 'Unknown' = manual CSR; replace with 'DigiCert' / 'GlobalSign' if you have a KV-integrated CA account
+
+$policy | ConvertTo-Json -Depth 10 | Out-File policy.json -Encoding utf8
+
+# 2) Start the cert operation (creates a pending cert + CSR)
+az keyvault certificate create --vault-name $vault --name $certName --policy `@policy.json
+
+# 3) Export the CSR and send it to your CA
+$csr = az keyvault certificate pending show --vault-name $vault --name $certName --query csr -o tsv
+@"
+-----BEGIN CERTIFICATE REQUEST-----
+$csr
+-----END CERTIFICATE REQUEST-----
+"@ | Out-File rds.csr -Encoding ascii
+
+# ... submit rds.csr to your CA, download the issued cert as rds.cer ...
+
+# 4) Merge the signed cert back into Key Vault (private key never leaves the vault)
+az keyvault certificate pending merge --vault-name $vault --name $certName --file rds.cer
+```
+
+### 3c. Import an existing PFX *(you already have a cert)*
+
+Use this when your security team already has a `.pfx` from your enterprise CA or a public CA.
+
+```powershell
+$vault    = 'contoso-rds-kv01'
+$certName = 'rds-tls'
+$pfxPath  = 'C:\certs\rds-contoso-com.pfx'
+$pfxPwd   = Read-Host 'PFX password' -AsSecureString
+$pfxPwdPlain = [System.Net.NetworkCredential]::new('', $pfxPwd).Password
+
+az keyvault certificate import `
+  --vault-name $vault `
+  --name       $certName `
+  --file       $pfxPath `
+  --password   $pfxPwdPlain
+
+$pfxPwdPlain = $null   # remove plaintext from memory ASAP
+
+# Confirm it's exportable
+az keyvault certificate show-policy --vault-name $vault --name $certName `
+  --query "key_props.exportable" -o tsv
+# Must print: true
+```
+
+> [!WARNING]
+> If your `.pfx` was generated with the private key flagged non-exportable (e.g. created on a Windows machine with `-KeyExportPolicy NonExportable`), Key Vault will store it but the broker DSC step will fail to re-export. Re-issue the cert with exportable key material before importing.
+
+### 3d. Self-signed via Key Vault *(lab only)*
+
+Useful to verify the end-to-end binding flow before paying for a real cert. **Clients see a trust warning** and must click through it.
+
+```powershell
+$vault    = 'contoso-rds-kv01'
+$certName = 'rds-tls-selfsigned'
+$fqdn     = 'contoso-rds.westeurope.cloudapp.azure.com'   # match exactly what RD clients connect to
+
+$policy = az keyvault certificate get-default-policy | ConvertFrom-Json
+$policy.key_props.exportable           = $true
+$policy.x509_props.subject             = "CN=$fqdn"
+$policy.x509_props.sans                = @{ dns_names = @($fqdn); emails = @(); upns = @() }
+$policy.issuer_parameters.name         = 'Self'
+$policy.x509_props.validity_in_months  = 12
+$policy | ConvertTo-Json -Depth 10 | Out-File policy.json -Encoding utf8
+
+az keyvault certificate create --vault-name $vault --name $certName --policy `@policy.json
+```
+
+### 3e. Get the secret URI
+
+The KV VM extension and `Set-RDCertificate` need the **secret** URI (not the certificate URI), version-stripped so the deployment always picks up the current version:
+
+```powershell
+$secretUri = az keyvault certificate show --vault-name $vault --name $certName --query 'sid' -o tsv
+# Returns: https://contoso-rds-kv01.vault.azure.net/secrets/rds-tls/<version>
+
+$secretUri = ($secretUri -split '/')[0..4] -join '/'
+$secretUri
+# https://contoso-rds-kv01.vault.azure.net/secrets/rds-tls
+```
+
+Plug that value into `keyVaultCertSecretUri` in step 4.
+
+## 4. Edit `main.bicepparam`
+
+If Tier 0 ran, the file is already fully populated and you can skip this step. Otherwise set at minimum:
+
+```bicep
+// --- existing infra (always required) ---
+param existingVnetName              = 'corp-vnet'
+param existingVnetResourceGroup     = 'network-rg'
+param existingRdsSubnetName         = 'snet-rds'
+param adDomainName                  = 'contoso.local'
+param adDnsServerIp                 = '10.10.0.4'
+param allowedClientSourceAddressPrefixes = ['203.0.113.0/24','198.51.100.10/32']
+param gatewayDnsLabelPrefix         = 'contoso-rds'   // <prefix>.<region>.cloudapp.azure.com
+
+// --- TLS cert + vanity FQDN (only when enableCertificateBinding = true) ---
+param enableCertificateBinding = true
+param keyVaultName             = 'contoso-rds-kv01'
+param keyVaultResourceGroup    = 'rds-security-rg'
+param keyVaultCertSecretUri    = 'https://contoso-rds-kv01.vault.azure.net/secrets/rds-tls'  // from step 3e
+param publicGatewayFqdn        = 'rds.contoso.com'    // vanity FQDN clients type
+param certificateSubject       = 'CN=rds.contoso.com' // must be a substring of the cert's actual Subject
+```
+
+**Do not** put real values into `domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, or `artifactsLocation` — those come from env vars (step 2) and the `--parameters` override (step 5). Leave them as their `readEnvironmentVariable(...)` defaults.
+
+Full list of every parameter and its source: [README → Parameters reference](../README.md#parameters-reference-mainbicepparam).
+
+> [!TIP]
+> **Scripted shortcut for the cert block.** [`scripts/Set-BicepParamCertUri.ps1`](../scripts/Set-BicepParamCertUri.ps1) patches the six cert / FQDN values in place, takes a `.bak` backup, and validates with `az bicep build-params` (restoring on failure):
+>
+> ```powershell
+> ./scripts/Set-BicepParamCertUri.ps1 `
+>   -ParamFile main.bicepparam `
+>   -KeyVaultName contoso-rds-kv01 `
+>   -KeyVaultResourceGroup rds-security-rg `
+>   -KeyVaultCertSecretUri 'https://contoso-rds-kv01.vault.azure.net/secrets/rds-tls' `
+>   -CertificateSubject 'CN=rds.contoso.com' `
+>   -PublicGatewayFqdn rds.contoso.com `
+>   -EnableCertificateBinding $true
+> ```
+
+## 5. Deploy
 
 ```powershell
 cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm
@@ -127,7 +312,7 @@ az deployment group create `
 
 Typical wall-clock time on `Standard_D4s_v5`: **25–40 minutes** (VM provisioning + domain join reboot + DSC role install + RDS deployment).
 
-## 5. Verify
+## 6. Verify
 
 ```powershell
 $dep = az deployment group show -g rds-farm-rg -n main --query properties.outputs -o json | ConvertFrom-Json
@@ -139,14 +324,61 @@ Open the `rdWebUrl` from a client in one of the allow-listed CIDRs. Sign in with
 
 Run the full [Testing & verification](./testing.md) checks (5 stages) to confirm everything is healthy end-to-end.
 
-## Post-deployment steps still required
+## 7. Post-deployment steps still required
 
-These live outside the template regardless of which path (pipeline or this page) ran the deploy. See [README → Tier 2 — Post-deploy operations](../README.md#tier-2--post-deploy-operations) for the full walkthrough:
+These live outside the template regardless of which path (pipeline or this page) ran the deploy. See [README → Tier 2 — Post-deploy operations](../README.md#tier-2--post-deploy-operations) for the full walkthrough.
 
-1. **Public DNS CNAME** for the vanity FQDN — `scripts/Set-GatewayCname.ps1` if you use Azure DNS, otherwise create it in your DNS provider; see [Choosing your gateway FQDN](./gateway-fqdn.md).
-2. **RDS CALs** — activate on the broker (`RD Licensing Manager → Activate Server`) and add the broker computer object to the `Terminal Server License Servers` AD group.
-3. **Smoke tests** — [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1) plus the manual stages in [Testing & verification](./testing.md).
-4. **Cert renewal cadence** — see [Certificate renewal](./key-vault-cert.md#certificate-renewal). The KV VM extension keeps the local cert store in sync; `Set-RDCertificate` only re-runs on the next DSC apply.
+### 7a. Public DNS CNAME *(vanity FQDN only)*
+
+The Bicep deploy outputs `gatewayFqdn` — the target of your CNAME. Decision rationale: [Gateway FQDN and TLS certificate](./fqdn-and-cert.md).
+
+**Azure DNS shortcut:**
+
+```powershell
+# Auto-discover everything from the contoso.com zone + main deployment in rds-farm-rg
+./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds -Verify
+
+# Pin to a specific zone RG / different farm RG / explicit target, and probe RDWeb after
+./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds `
+  -ZoneResourceGroup dns-rg -FarmResourceGroup rds-farm-rg `
+  -Target contoso-rds.westeurope.cloudapp.azure.com -Verify
+```
+
+**Manually, with `az`:**
+
+```powershell
+# 1) Grab the LB FQDN from the deploy outputs
+$target = az deployment group show -g rds-farm-rg -n main `
+  --query properties.outputs.gatewayFqdn.value -o tsv
+# e.g. contoso-rds.westeurope.cloudapp.azure.com
+
+# 2a) If your zone is in Azure DNS:
+az network dns record-set cname set-record `
+  --resource-group dns-rg `
+  --zone-name contoso.com `
+  --record-set-name rds `
+  --cname $target `
+  --ttl 300
+
+# 2b) If your zone is elsewhere (Cloudflare, GoDaddy, Route 53, etc.),
+#     create a CNAME record manually in their portal:
+#     Name:  rds
+#     Type:  CNAME
+#     Value: <gatewayFqdn from step 1>
+#     TTL:   300  (5 min — keeps you nimble during cutover / rollback)
+```
+
+### 7b. RDS CALs
+
+Activate the license server on the broker (`RD Licensing Manager → Activate Server`) and install your real RDS CALs. Then add the broker computer object to the AD `Terminal Server License Servers` group (requires Domain Admin — outside the rights granted to the domain-join service account). Without it, the broker can't hand out CALs after the 120-day per-user grace period expires.
+
+### 7c. Smoke tests
+
+[`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1) plus the manual stages in [Testing & verification](./testing.md).
+
+### 7d. Cert renewal cadence
+
+The KV VM extension keeps the local cert store in sync; `Set-RDCertificate` only re-runs on the next DSC apply. Full renewal flow: [Gateway FQDN and TLS certificate → Certificate renewal](./fqdn-and-cert.md#certificate-renewal).
 
 For published apps instead of the default desktop collection:
 
