@@ -3,7 +3,7 @@
     End-to-end manual deployment wrapper for the RDS farm (no CI required).
 
 .DESCRIPTION
-    Replaces the four-step recipe in docs/deployment.md with a single command.
+    Replaces the four-step recipe in docs/manual-deploy.md with a single command.
     Mirrors what the GitHub Actions workflow does but runs on your laptop:
 
       1. Read passwords interactively (Read-Host -AsSecureString) unless
@@ -13,9 +13,13 @@
          in the process environment (so bicepparam's readEnvironmentVariable
          calls resolve).
       4. Ensure the target resource group exists.
-      5. Run 'az deployment group what-if' (always) and, if -Action deploy,
+      5. Run tests/Test-PreDeployReadiness.ps1 (same checks the pipeline's
+         `pre-deploy-checks` job runs - VNet/subnet sizing, KV+cert, SAS
+         reachability, az deployment group validate). Skip with
+         -SkipReadinessCheck.
+      6. Run 'az deployment group what-if' (always) and, if -Action deploy,
          then 'az deployment group create'.
-      6. Print the deployment outputs (gatewayFqdn, rdWebUrl, etc.).
+      7. Print the deployment outputs (gatewayFqdn, rdWebUrl, etc.).
 
     The script never echoes secrets and never persists them to disk.
 
@@ -49,6 +53,12 @@
 
 .PARAMETER SkipWhatIf
     Go straight to deploy without running what-if first. Use sparingly.
+
+.PARAMETER SkipReadinessCheck
+    Skip the tests/Test-PreDeployReadiness.ps1 gate that runs the same checks
+    the pipeline's `pre-deploy-checks` job runs (VNet/subnet sizing, Key Vault
+    + cert sanity, SAS reachability, `az deployment group validate`). Skip only
+    when you have a known-bad config you're explicitly trying to deploy.
 
 .EXAMPLE
     # Preview a manual deployment
@@ -85,7 +95,8 @@ param(
     [string]$Repo,
 
     [switch]$SkipPublish,
-    [switch]$SkipWhatIf
+    [switch]$SkipWhatIf,
+    [switch]$SkipReadinessCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,7 +192,29 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to create/ensure RG $ResourceGroup." }
 Write-Host "    OK"
 
 # ---------------------------------------------------------------------------
-# 4. What-if (unless suppressed) + optional deploy
+# 4. Pre-deploy readiness (same checks as the pipeline's pre-deploy-checks job)
+# ---------------------------------------------------------------------------
+if (-not $SkipReadinessCheck) {
+    Write-Host ""
+    Write-Host "==> Step 4: Pre-deploy readiness" -ForegroundColor Green
+    $readiness = Join-Path $PSScriptRoot '..' 'tests' 'Test-PreDeployReadiness.ps1'
+    if (Test-Path -LiteralPath $readiness) {
+        & $readiness -ResourceGroup $ResourceGroup -Location $Location `
+            -BicepFile $BicepFile -BicepParamFile $BicepParamFile
+        if ($LASTEXITCODE -ne 0) {
+            throw "Pre-deploy readiness check FAILED (exit $LASTEXITCODE). Fix the issues above or rerun with -SkipReadinessCheck if you know better."
+        }
+        Write-Host "    All readiness checks passed."
+    } else {
+        Write-Host "    [WARN] tests/Test-PreDeployReadiness.ps1 not found - skipping." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host ""
+    Write-Host "==> Step 4: Pre-deploy readiness SKIPPED (per -SkipReadinessCheck)" -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
+# 5. What-if (unless suppressed) + optional deploy
 # ---------------------------------------------------------------------------
 $commonArgs = @(
     '--resource-group', $ResourceGroup,
@@ -192,14 +225,14 @@ $commonArgs = @(
 
 if (-not $SkipWhatIf) {
     Write-Host ""
-    Write-Host "==> Step 4a: what-if" -ForegroundColor Green
+    Write-Host "==> Step 5a: what-if" -ForegroundColor Green
     az deployment group what-if @commonArgs
     if ($LASTEXITCODE -ne 0) { throw "what-if failed (exit $LASTEXITCODE)." }
 }
 
 if ($Action -eq 'deploy') {
     Write-Host ""
-    Write-Host "==> Step 4b: deploy" -ForegroundColor Green
+    Write-Host "==> Step 5b: deploy" -ForegroundColor Green
     $depName = "main-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')
     $outputsJson = az deployment group create `
         --name $depName `

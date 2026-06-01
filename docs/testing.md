@@ -2,6 +2,9 @@
 
 [← Back to main README](../README.md)
 
+> [!NOTE]
+> **Where this fits in the tier model.** Layers 1–4 below are Tier 2 (ad-hoc, from your laptop or a jumpbox). Layer 5 is Tier 1 (the pipeline runs the same checks automatically on every push/PR/deploy). The local-only [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) wraps Layer 1 with extra Azure-side pre-flight checks and is the laptop equivalent of the pipeline's `pre-deploy-checks` job.
+
 A staged set of checks: **(1)** template sanity before you deploy, **(2)** Azure-side smoke tests right after `az deployment group create` returns, **(3)** RDS-role checks on the VMs themselves, **(4)** end-to-end client connection, and **(5)** continuous testing in CI. Run them in order — most "RD Web won't open" tickets are caught by checks 2 or 3.
 
 ## 1. Pre-deployment (no resources touched)

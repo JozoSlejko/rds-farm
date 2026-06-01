@@ -2,6 +2,9 @@
 
 [← Back to main README](../README.md)
 
+> [!NOTE]
+> **Where this fits in the tier model.** Picking the hostname strategy and acquiring the matching cert (Steps A + C + D below) is **Tier 0**. Creating the public CNAME (Step B) is **Tier 2** — runs *once after the first farm deploy completes*, because you need the `gatewayFqdn` output as the CNAME target. For Azure DNS, [`scripts/Set-GatewayCname.ps1`](../scripts/Set-GatewayCname.ps1) automates Step B end-to-end.
+
 You have **two options** for the public hostname that RD clients will type into Remote Desktop / RD Web. Pick one **before** generating the TLS certificate, because the cert's Subject/SAN must match exactly.
 
 ## Option 1 — Use the Azure-managed LB hostname (lab/dev only)

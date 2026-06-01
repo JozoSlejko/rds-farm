@@ -1,5 +1,18 @@
 using 'main.bicep'
 
+// =============================================================================
+//  TEMPLATE VALUES BELOW - DO NOT PUSH UNEDITED
+//
+//  The values below (existingVnetName, adDomainName, publicGatewayFqdn, etc.)
+//  are placeholders. Tier 0 (`scripts/Initialize-RdsFarm.ps1`) overwrites them
+//  with your real values, then `git push` runs the pipeline. If you push this
+//  file unedited, the pipeline's `pre-deploy-checks` job will reject it.
+//
+//  See:
+//    - README -> Deployment guide       (start here if new)
+//    - docs/parameters-reference.md     (per-parameter source-of-truth)
+// =============================================================================
+
 param existingVnetName = 'corp-vnet'
 param existingVnetResourceGroup = 'network-rg'
 param existingRdsSubnetName = 'snet-rds'

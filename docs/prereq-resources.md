@@ -2,6 +2,15 @@
 
 [← Back to main README](../README.md)
 
+> [!NOTE]
+> **Where this fits in the tier model.** Running `prereqs/` is **Tier 0** (one-time provisioning) regardless of who triggers it:
+>
+> - **Via the orchestrator (recommended):** [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) deploys this template for you with `adminPrincipals` pre-populated. You don't edit `prereqs/main.bicepparam` at all.
+> - **From the pipeline:** trigger `Actions → Deploy RDS Farm → Run workflow` with `prereqs_action: deploy-new`. The CI service principal needs sub-scope `Contributor` + `RBAC Administrator` — both granted automatically by [`scripts/Initialize-CiPrerequisites.ps1`](../scripts/Initialize-CiPrerequisites.ps1).
+> - **From your laptop directly:** [Option 2](#option-2--manual-az-deployment-sub-create) below — useful for debugging or when you can't use the orchestrator.
+>
+> After this is done once, every subsequent farm deploy is **Tier 1** (pipeline or laptop via [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1)) and reads the resources it just created. See [README → Deployment guide](../README.md#deployment-guide).
+
 This guide describes the optional **`prereqs/`** Bicep template that provisions the two Azure resources the main RDS farm needs but doesn't create itself:
 
 1. A **storage account** (with a `dsc` blob container) for the `Configuration.zip` artifact.
@@ -111,4 +120,4 @@ You can pre-create the two resource groups out of band and grant the deployer on
 
 2. **Create or import the TLS cert.** Follow [Key Vault prep → Step 2](./key-vault-cert.md#step-2-create-the-certificate) — Step 1 (RBAC mode + self-grant Certificates Officer) is already handled by this template.
 3. **Update `main.bicepparam`.** Set `keyVaultName`, `keyVaultResourceGroup`, and `keyVaultCertSecretUri` (the value the prereqs job prints in its summary).
-4. **Run the main farm deploy.** Either trigger the workflow with `prereqs_action: use-existing, action: deploy`, or `az deployment group create` manually per [Deployment](./deployment.md).
+4. **Run the main farm deploy.** Either trigger the workflow with `prereqs_action: use-existing, action: deploy`, or `az deployment group create` manually per [Manual deploy (escape hatch)](./manual-deploy.md).

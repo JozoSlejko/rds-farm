@@ -6,60 +6,6 @@ This template replaces the legacy [`Azure/RDS-Templates`](https://github.com/Azu
 
 ---
 
-## 📚 Documentation
-
-| Guide | Read this when… |
-| --- | --- |
-| [Prerequisites & parameters reference](docs/prerequisites.md) | Planning the deployment — required infra, accounts, and the full `main.bicepparam` reference. |
-| [Prerequisite resources (Key Vault + storage)](docs/prereqs.md) | You want to provision the prereq Key Vault and DSC storage account automatically instead of pre-creating them by hand. |
-| [Choosing your gateway FQDN](docs/gateway-fqdn.md) | Deciding between the free Azure LB hostname (lab only) and a vanity CNAME (production). |
-| [Key Vault prep](docs/key-vault-cert.md) | Setting up the TLS cert for the four RDS roles — vault RBAC, CSR/PFX import/self-signed flows, and renewal. |
-| [Deployment](docs/deployment.md) | Step-by-step manual deploy: package DSC, set secrets, fill bicepparam, run `az deployment group create`. |
-| [Testing & verification](docs/testing.md) | Five-stage smoke tests from pre-deploy `what-if` to end-to-end client RDP. |
-| [Troubleshooting](docs/troubleshooting.md) | "Why doesn't this work?" — the most common failures and their fixes. |
-| [CI/CD with GitHub Actions](docs/ci-cd.md) | Wiring up the included `.github/workflows/deploy.yml` (OIDC federated creds, RBAC, env approval). |
-| [When to use AVD instead](docs/avd-comparison.md) | Deciding whether to use this template or Azure Virtual Desktop. |
-
----
-
-## 🚀 How to deploy — three tiers
-
-The end-to-end flow splits into three tiers. Tier 0 runs **once** from a human's laptop; Tier 1 is the **pipeline** (re-runnable for every change); Tier 2 is **post-deploy** scripts you reach for as needed.
-
-```mermaid
-flowchart LR
-    subgraph T0["Tier 0 — One-time bootstrap (laptop)"]
-        direction TB
-        BS["scripts/Initialize-CiPrerequisites.ps1<br/>(auto-runs Test-CiPrerequisites at the end)"]
-        CERT["scripts/New-RdsCertificate.ps1<br/>+ Set-BicepParamCertUri.ps1<br/>(cert + main.bicepparam)"]
-    end
-    subgraph T1["Tier 1 — GitHub Actions pipeline"]
-        direction TB
-        WF[".github/workflows/deploy.yml<br/>lint + tests + prereqs + DSC upload<br/>+ what-if + deploy + post-deploy health"]
-    end
-    subgraph T2["Tier 2 — Post-deploy / ops (laptop, ad-hoc)"]
-        direction TB
-        DNS["scripts/Set-GatewayCname.ps1<br/>(vanity-FQDN deploys, Azure DNS)"]
-        RM["scripts/Remove-RdsFarm.ps1<br/>(tear-down)"]
-        LOCAL["scripts/Invoke-ManualDeploy.ps1<br/>(deploy without the pipeline)"]
-    end
-
-    T0 --> T1 --> T2
-```
-
-| Tier | Trigger | Lives where | What runs |
-| --- | --- | --- | --- |
-| **Tier 0 — bootstrap** | You, one time | Your laptop | [`scripts/Initialize-CiPrerequisites.ps1`](scripts/Initialize-CiPrerequisites.ps1) — creates Entra app + federated creds + RBAC + GitHub secrets/variables/environments, then auto-runs [`tests/Test-CiPrerequisites.ps1`](tests/Test-CiPrerequisites.ps1) as a self-check. **Cert setup** is also Tier 0: [`scripts/New-RdsCertificate.ps1`](scripts/New-RdsCertificate.ps1) + [`scripts/Set-BicepParamCertUri.ps1`](scripts/Set-BicepParamCertUri.ps1) (human-gated — CSR submission, private-key custody). |
-| **Tier 1 — pipeline** | `git push` / `workflow_dispatch` | [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) | Lint → `tests/Test-DscConfiguration.ps1` → `tests/Test-BicepParamValues.ps1` → optional `prereqs` deploy → [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) (zip + upload + mint SAS) → pre-deploy infra checks → `what-if` → (on `main`) deploy → `tests/Test-PostDeployHealth.ps1`. **Re-runnable** for every code change. |
-| **Tier 2 — ops** | You, ad-hoc | Your laptop | [`scripts/Set-GatewayCname.ps1`](scripts/Set-GatewayCname.ps1) (vanity CNAME in Azure DNS, post first deploy), [`scripts/Remove-RdsFarm.ps1`](scripts/Remove-RdsFarm.ps1) (tear-down). [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) is the **pipeline-free escape hatch** for laptop deploys; [`tests/Test-PreDeployReadiness.ps1`](tests/Test-PreDeployReadiness.ps1) mirrors the pipeline's `pre-deploy-checks` job locally. |
-
-> [!NOTE]
-> **One source of truth.** The pipeline's DSC upload step in Tier 1 calls the **same** [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) that [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) uses locally — so laptop and CI runs cannot drift apart.
-
-The detailed manual checklist below maps every action to its tier and the script (if any) that automates it.
-
----
-
 ## What it deploys
 
 | Component | Count | Network exposure |
@@ -99,68 +45,141 @@ flowchart TB
 
 ---
 
-## 🛠️ Manual setup checklist
+## Deployment guide
 
-> [!IMPORTANT]
-> The template does **not** touch Active Directory, DNS, your CA, GitHub, or Microsoft 365. Everything below is a **you** task. Work through it in order — later items depend on earlier ones.
->
-> **One-command shortcut:** [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) bundles steps 10, 13, and 14. Other steps have inline `scripts/` callouts.
+The flow is **prerequisites → Tier 0 → Tier 1 → Tier 2**. The pipeline is the supported deploy path; a laptop "escape hatch" exists for when CI is unavailable but it isn't a parallel workflow you have to maintain.
 
-### Phase 1 — Active Directory & networking *(before first deploy)*
+```mermaid
+flowchart LR
+    subgraph PR["Prerequisites (outside Azure)"]
+        direction TB
+        AD["AD account + RDS access group<br/>VNet + subnet<br/>Allowed client CIDRs<br/>Gateway hostname + cert plan"]
+    end
+    subgraph T0["Tier 0 — Bootstrap (one command, one time)"]
+        direction TB
+        BS["scripts/Initialize-RdsFarm.ps1<br/>→ CI wiring (Entra app, GH secrets, envs)<br/>→ Prereq Azure (KV + storage SA)<br/>→ TLS cert in Key Vault<br/>→ Patches main.bicepparam<br/>→ Sets ARTIFACTS_STORAGE_ACCOUNT var"]
+    end
+    subgraph T1["Tier 1 — Deploy (every change, pipeline)"]
+        direction TB
+        WF[".github/workflows/deploy.yml<br/>PR → what-if · merge → deploy<br/>Escape hatch: Invoke-ManualDeploy.ps1"]
+    end
+    subgraph T2["Tier 2 — Post-deploy (ad-hoc, manual)"]
+        direction TB
+        DNS["Set-GatewayCname.ps1 (CNAME)<br/>RDS CALs · AD broker group<br/>Smoke tests · Remove-RdsFarm.ps1"]
+    end
 
-- [ ] **1. AD DS reachable from the target subnet.** A DC with DNS, LDAP, Kerberos, and SMB reachable from the subnet you'll deploy into. See [Prerequisites](docs/prerequisites.md).
-- [ ] **2. Domain-join service account.** Pre-create a service account that has delegated rights to join machines to the target OU. Its password goes into `$env:DOMAIN_JOIN_PASSWORD`.
-- [ ] **3. Test AD user + security group.** Create a group (e.g. `RDS-Users`) in your AD, add the test user, and set `rdsAccessGroup` to its sAMAccountName. The template never writes to AD. (Use `Domain Users` for a quick lab.)
-- [ ] **4. Target VNet + subnet exist.** A subnet that can route to the DC. Optionally an `AzureBastionSubnet` (/26) if you want `deployBastion = true`.
-- [ ] **5. Allowed client source IPs.** Decide the CIDR list for `allowedClientSourceAddressPrefixes` — your office/VPN egress IPs only. **Never use `0.0.0.0/0`.**
+    PR --> T0 --> T1 --> T2
+```
 
-### Phase 2 — Hostname & TLS certificate *(before first deploy)*
-
-- [ ] **6. Pick the gateway hostname strategy.** Vanity CNAME like `rds.contoso.com` (production) or the free Azure LB hostname (lab/dev only). See [Choosing your gateway FQDN](docs/gateway-fqdn.md).
-- [ ] **7. Provision the Key Vault.** Existing or new vault in your subscription with `enableRbacAuthorization = true`. Grant yourself `Key Vault Certificates Officer`. See [Key Vault prep → Step 1](docs/key-vault-cert.md#step-1-make-sure-the-vault-uses-rbac-not-access-policies). *You can let the pipeline create the vault for you — see [Prerequisite resources](docs/prereqs.md).*
-- [ ] **8. Create or import the TLS cert.** Pick Option A (CSR + public CA), Option B (import existing PFX), or Option C (self-signed for lab). **Cert policy MUST be `exportable: true`.** See [Key Vault prep → Step 2](docs/key-vault-cert.md#step-2-create-the-certificate). *Scripted shortcut:* [`scripts/New-RdsCertificate.ps1`](scripts/New-RdsCertificate.ps1) handles all three modes and enforces `exportable: true`.
-- [ ] **9. Capture the cert's secret URI.** Run `az keyvault certificate show --query sid` and strip the version segment → put into `keyVaultCertSecretUri`. See [Step 3](docs/key-vault-cert.md#step-3-get-the-secret-uri-and-put-it-in-mainbicepparam). *Scripted shortcut:* [`scripts/Set-BicepParamCertUri.ps1`](scripts/Set-BicepParamCertUri.ps1) patches the param file in place (or run `New-RdsCertificate.ps1 -OutputBicepParam main.bicepparam` to chain steps 8 and 9).
-
-### Phase 3 — Artifacts storage *(before first deploy)*
-
-- [ ] **10. Storage account + `dsc` container.** Hosts the `Configuration.zip` that VMs download via the DSC extension. *You can let the pipeline create both — see [Prerequisite resources](docs/prereqs.md) and run with `prereqs_action: deploy-new`.* Otherwise pre-create the account and the container.
-- [ ] **11. *(CI only)* GitHub Actions wiring.** Entra app + federated credentials + Azure RBAC + GitHub repo secrets/variables/environments. See [CI/CD with GitHub Actions](docs/ci-cd.md).
-
-### Phase 4 — Deploy
-
-- [ ] **12. Fill in `main.bicepparam`.** All required values from [Prerequisites → Parameters reference](docs/prerequisites.md#parameters-reference).
-- [ ] **13. Export deployment secrets in your shell.** `DOMAIN_JOIN_PASSWORD`, `LOCAL_ADMIN_PASSWORD`, `ARTIFACTS_SAS`.
-- [ ] **14. Run the deployment.** `az deployment group create -g rds-farm-rg --parameters main.bicepparam` — full walkthrough in [Deployment](docs/deployment.md). Wall-clock: 25–40 min. *Scripted shortcut:* [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) bundles publish-DSC + what-if + deploy.
-
-### Phase 5 — After the first deploy
-
-- [ ] **15. Create the public CNAME** *(vanity-FQDN deployments only)*. Point `rds.contoso.com` → `gatewayFqdn` output (TTL 300). See [Gateway FQDN → Step B](docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn). *Scripted shortcut for Azure DNS:* [`scripts/Set-GatewayCname.ps1`](scripts/Set-GatewayCname.ps1) reads `gatewayFqdn` from the deployment outputs and upserts the CNAME (use `-Verify` to probe `https://<fqdn>/RDWeb/`).
-- [ ] **16. Install RDS CALs on the broker.** Open *RD Licensing Manager* → Activate Server. The deployment runs in the 120-day grace period until you do this.
-- [ ] **17. Add the broker computer to AD `Terminal Server License Servers` group.** Requires Domain Admin; outside the rights granted to the domain-join service account. Without it the broker can't hand out CALs after grace expires.
-- [ ] **18. Run smoke tests.** Sections 2–4 of [Testing & verification](docs/testing.md#2-post-deployment-azure-side-smoke-tests).
-
----
-
-## What's automated end-to-end
-
-From a clean pipeline run, the template does the following **without any manual step on the VMs** before the test user can sign in to RD Web:
-
-| # | Step | Where it runs | How |
+| Phase | When | Where | Goal |
 | --- | --- | --- | --- |
-| 1 | Provision NSG, LB, Public IP, NICs, VMs (Trusted Launch) | ARM control plane | Bicep |
-| 2 | Set NIC DNS → your existing DC IP (`adDnsServerIp`) | VM NIC | Bicep (`dnsSettings.dnsServers`) |
-| 3 | **Domain-join every VM** to your existing AD | VM | `JsonADDomainExtension` v1.3 (`Options: 3`) |
-| 4 | Install RDS roles (`RDS-Gateway`, `RDS-Web-Access`, `RPC-over-HTTP-Proxy`, `RDS-Connection-Broker`, `RDS-Licensing`, `RDS-RD-Server`, RSAT) | VM | DSC `WindowsFeature` resources |
-| 5 | `New-RDSessionDeployment` (broker + web access + session hosts) | Broker | DSC `Script CreateRDSDeployment` |
-| 6 | `Add-RDServer -Role RDS-GATEWAY -GatewayExternalFqdn <publicGatewayFqdn>` | Broker | same script |
-| 7 | `Add-RDServer -Role RDS-LICENSING` + `Set-RDLicenseConfiguration -Mode PerUser` (120-day grace) | Broker | same script |
-| 8 | `Set-RDDeploymentGatewayConfiguration` — force traffic through gateway, cache RD Web creds | Broker | same script |
-| 9 | `New-RDSessionCollection` (default `DesktopCollection`) | Broker | same script |
-| 10 | `Set-RDSessionCollectionConfiguration -UserGroup <netbios>\<rdsAccessGroup>` | Broker | same script |
-| 11 | **Create default RD CAP + RAP scoped to `rdsAccessGroup`** so the gateway actually accepts sessions | Gateway | DSC `Script ConfigureRDGatewayPolicies` (uses `RDS:\GatewayServer` PSDrive) |
-| 12 | Optional: pull TLS cert from Key Vault → `Set-RDCertificate` for all 4 roles | Broker | KV VM extension + DSC `Script BindRDSCertificates` |
+| **Prerequisites** | Before anything | AD / network / DNS — outside Azure | Things this repo can't create for you (AD account + group, VNet + subnet, client CIDRs, hostname plan). |
+| **Tier 0 — Bootstrap** | Once, before first deploy | Your laptop | One script ([`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1)) does it all: GitHub Actions wiring, Azure prereq RGs/KV/SA, TLS cert, fully patched `main.bicepparam`. |
+| **Tier 1 — Deploy** | Every code change | **GitHub Actions pipeline** (escape hatch: laptop) | `package DSC → upload → SAS → pre-flight → what-if → deploy → post-deploy tests`. |
+| **Tier 2 — Post-deploy** | Ad-hoc | Your laptop | Public CNAME, RDS CALs activation, AD `Terminal Server License Servers` membership, smoke tests, tear-down. |
 
-After step 12 returns success, opening `https://<publicGatewayFqdn>/RDWeb/` from a client in an allow-listed CIDR and signing in as any member of `rdsAccessGroup` returns the `DesktopCollection` desktop.
+> [!NOTE]
+> **Pipeline is the supported deploy path.** Tier 0 always wires up GitHub Actions because every change is meant to flow through PR-with-what-if → merge-to-deploy. The laptop wrapper [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) exists as a one-off escape hatch (e.g. CI is down, or you're debugging the Bicep itself); it reads the **same** `main.bicepparam` and calls the **same** [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) the workflow does, so the two paths can't drift.
+
+For a printable / tickable version of the steps below, see [`docs/manual-checklist.md`](docs/manual-checklist.md).
+
+### Prerequisites — things outside this repo's scope
+
+These five items exist before you ever touch this repo. They live in AD, networking, or DNS, so no script can create them for you. Tier 0 will prompt you for the values that name them.
+
+| Item | Who creates it | Notes |
+| --- | --- | --- |
+| **AD service account for domain-join** | AD admin | Delegated rights to join machines to the target OU. You'll supply its password to Tier 0 once (stored as the `DOMAIN_JOIN_PASSWORD` GitHub secret). Default sAMAccountName: `svc-domainjoin`. |
+| **AD security group for RDS access** | AD admin | Members of this group can sign in via RD Web + RD Gateway. Use `Domain Users` for a quick lab; a dedicated group like `RDS-Users` for prod. |
+| **Existing Azure VNet + subnet** | Network admin | Subnet must route to a DC (DNS, LDAP, Kerberos, SMB). Optionally add an `AzureBastionSubnet` (/26) if you want Bastion. |
+| **Allowed client source CIDRs** | You | Office / VPN egress IPs that may reach `TCP 443` + `UDP 3391`. **Never `0.0.0.0/0`.** |
+| **Gateway hostname plan** | You | Vanity CNAME like `rds.contoso.com` (production — requires a public cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). See [`docs/gateway-fqdn.md`](docs/gateway-fqdn.md). |
+
+Full reference with parameter mappings: [`docs/parameters-reference.md`](docs/parameters-reference.md).
+
+You also need on your **laptop** for Tier 0: PowerShell 7+, `az` CLI signed in (`az login`), `gh` CLI signed in (`gh auth login --scopes repo`), Owner on the target subscription, and Application Developer in the Entra tenant.
+
+### Tier 0 — Bootstrap (one command)
+
+A single script orchestrates everything Tier 0 needs. It calls the focused per-area scripts in the right order, prompts for missing inputs, and never persists secrets to disk.
+
+```powershell
+./scripts/Initialize-RdsFarm.ps1 `
+    -GitHubRepo 'contoso/rds-farm' `
+    -AdDomainName contoso.local -AdDnsServerIp 10.10.0.4 `
+    -RdsAccessGroup 'RDS-Users' `
+    -ExistingVnetName corp-vnet `
+    -ExistingVnetResourceGroup network-rg `
+    -ExistingRdsSubnetName snet-rds `
+    -AllowedClientSourceAddressPrefixes '203.0.113.0/24','198.51.100.10/32' `
+    -PublicGatewayFqdn rds.contoso.com `
+    -ArtifactsStorageAccount contosordsart01 `
+    -KeyVaultName contoso-rds-kv01 `
+    -CertMode Csr `
+    -RequireProductionApproval
+```
+
+Any required value you omit is prompted for interactively (with sensible defaults shown in brackets). Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -CertMode SelfSigned` — the script asks for the rest.
+
+In one pass it wires GitHub Actions, deploys the prereq Azure resources, issues the TLS cert in Key Vault, and writes a fully populated `main.bicepparam`. You don't hand-edit the bicepparam afterwards. Per-step breakdown: [`docs/manual-checklist.md`](docs/manual-checklist.md). Parameter-by-parameter reference: [`docs/parameters-reference.md`](docs/parameters-reference.md).
+
+**Csr mode is two-pass.** The first run generates a CSR file, then halts before the bicepparam is overwritten with an incomplete cert URI. Submit the CSR to your CA, then re-run `Initialize-RdsFarm.ps1` (or [`scripts/New-RdsCertificate.ps1`](scripts/New-RdsCertificate.ps1) directly with `-MergeSignedCert`) to finish.
+
+**Idempotent.** Re-running is safe: existing Entra apps / RBAC / KV / SA / GH secrets are reused; the bicepparam is re-patched in place (a `.bak` backup is written).
+
+### Tier 1 — Deploy (pipeline)
+
+After Tier 0 finishes, commit `main.bicepparam` and push:
+
+```powershell
+git add main.bicepparam
+git commit -m 'Initialize farm config'
+git push
+```
+
+| Trigger | What runs |
+| --- | --- |
+| PR to `main` | `lint → config-tests → upload-artifacts → pre-deploy-checks → what-if`. The what-if diff is posted as a (collapsible) PR comment by `github-actions[bot]` and also written to the run's job summary. |
+| Merge to `main` | All of the above plus `deploy` (gated by the `production` environment) and `post-deploy-tests`. |
+| `workflow_dispatch` | Same plus the `prereqs_action` toggle (`use-existing` / `what-if` / `deploy-new`) — useful if you want CI to re-validate the prereqs deployment Tier 0 already did, or to redeploy them after editing [`prereqs/main.bicep`](prereqs/main.bicep). |
+
+Typical wall-clock time on `Standard_D4s_v5`: **25–40 min**. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](tests/Test-PostDeployHealth.ps1) and confirms every VM extension succeeded, LB backend is healthy, DNS resolves, and `https://<gatewayFqdn>/RDWeb/` returns 200. Full CI/CD reference: [`docs/ci-cd.md`](docs/ci-cd.md). What the deploy actually does to the VMs (Bicep + DSC, 12 steps): [`docs/manual-deploy.md`](docs/manual-deploy.md#what-the-deployment-does-end-to-end). Test details: [`docs/testing.md`](docs/testing.md).
+
+#### Escape hatch — laptop deploy
+
+Use this **only** when CI is unavailable (workflow disabled / GitHub outage) or when you're iterating on the Bicep itself. It reads the same `main.bicepparam`, calls the same [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), automatically runs the same [`tests/Test-PreDeployReadiness.ps1`](tests/Test-PreDeployReadiness.ps1) gate as the pipeline's `pre-deploy-checks` job, and runs the same `az deployment group what-if` / `create`. The only thing it bypasses is the workflow's environment approval gate.
+
+```powershell
+# Preview only (artifacts get published; readiness checks run; deployment is what-if)
+./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount contosordsart01
+
+# Apply (prompts for DOMAIN_JOIN_PASSWORD / LOCAL_ADMIN_PASSWORD if not already in env)
+./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount contosordsart01
+```
+
+Equivalent broken-down `az` commands (when scripts fail and you want to debug): [`docs/manual-deploy.md`](docs/manual-deploy.md).
+
+### Tier 2 — Post-deploy operations
+
+After the first successful deploy you need to do four things, **none** of which are inside Bicep's scope:
+
+1. **Public CNAME** *(vanity-FQDN deploys only)* — point `rds.contoso.com` → the `gatewayFqdn` output of the deployment. For Azure DNS:
+
+   ```powershell
+   ./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds -Verify
+   ```
+
+   For other DNS providers (Cloudflare, GoDaddy, Route 53…) create the CNAME by hand using [`docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn`](docs/gateway-fqdn.md#step-b-create-the-cname-after-the-first-deploy-you-need-gatewayfqdn).
+2. **Activate the license server** on the broker via *RD Licensing Manager → Activate Server* and install your real RDS CALs. The deploy runs in the 120-day per-user grace period until you do this.
+3. **Add the broker computer to AD `Terminal Server License Servers`** group (requires Domain Admin — outside the rights granted to the domain-join service account).
+4. **Smoke tests.** Run Sections 2–4 of [`docs/testing.md`](docs/testing.md) for an end-to-end client check.
+
+Tear-down when the lab is no longer needed:
+
+```powershell
+./scripts/Remove-RdsFarm.ps1                              # farm RG only, interactive
+./scripts/Remove-RdsFarm.ps1 -IncludeArtifactsRg -Force   # also nukes the prereqs RGs
+```
 
 ---
 
@@ -168,7 +187,7 @@ After step 12 returns success, opening `https://<publicGatewayFqdn>/RDWeb/` from
 
 ```text
 rds-farm/
-├── README.md                   # this file (overview + manual checklist + nav)
+├── README.md                   # this file (overview + deployment guide + nav)
 ├── main.bicep                  # entry point
 ├── main.bicepparam             # environment values
 ├── dsc/
@@ -187,16 +206,16 @@ rds-farm/
 │   └── modules/
 │       ├── keyvault.bicep
 │       └── storage.bicep
-├── docs/                       # detailed guides linked from the table above
-│   ├── prerequisites.md
-│   ├── prereqs.md
+├── docs/                       # detailed guides linked from the Documentation table below
+│   ├── manual-checklist.md      # printable companion to the Deployment guide
+│   ├── parameters-reference.md  # per-parameter source (file / env var / CI override)
+│   ├── prereq-resources.md      # the prereqs/ Bicep template (KV + storage SA)
 │   ├── gateway-fqdn.md
 │   ├── key-vault-cert.md
-│   ├── deployment.md
-│   ├── testing.md
-│   ├── troubleshooting.md
+│   ├── manual-deploy.md         # escape-hatch az commands + what the deploy does
 │   ├── ci-cd.md
-│   └── avd-comparison.md
+│   ├── testing.md
+│   └── troubleshooting.md
 ├── tests/                      # automated infra + config tests (used by deploy.yml)
 │   ├── Test-DscConfiguration.ps1       # PSScriptAnalyzer + parse + Configuration discovery
 │   ├── Test-BicepParamValues.ps1       # compile main.bicepparam + value-invariant checks
@@ -204,16 +223,35 @@ rds-farm/
 │   ├── Test-CiPrerequisites.ps1        # verify Initialize-CiPrerequisites.ps1 output (read-only)
 │   └── Test-PreDeployReadiness.ps1     # local equivalent of CI pre-deploy-checks job
 ├── scripts/                    # bootstrap + helper scripts
+│   ├── Initialize-RdsFarm.ps1          # Tier-0 ORCHESTRATOR — calls the four below in order
 │   ├── Initialize-CiPrerequisites.ps1  # Tier-0: Entra app + federated creds + RBAC + GitHub secrets
 │   ├── Publish-DscArtifact.ps1         # zip + upload Configuration.zip + mint user-delegation SAS
-│   ├── Invoke-ManualDeploy.ps1         # end-to-end manual deploy wrapper (no CI required)
+│   ├── Invoke-ManualDeploy.ps1         # Tier-1 laptop escape hatch (no CI required)
 │   ├── New-RdsCertificate.ps1          # create/import TLS cert in Key Vault (CSR/PFX/SelfSigned)
 │   ├── Set-BicepParamCertUri.ps1       # patch cert-related params in main.bicepparam in place
-│   ├── Set-GatewayCname.ps1            # set vanity-FQDN CNAME in Azure DNS (idempotent)
-│   └── Remove-RdsFarm.ps1              # tear down farm RG (optional artifacts/security RGs)
+│   ├── Set-GatewayCname.ps1            # Tier-2: set vanity-FQDN CNAME in Azure DNS (idempotent)
+│   └── Remove-RdsFarm.ps1              # Tier-2: tear down farm RG (optional artifacts/security RGs)
 └── .github/workflows/
     └── deploy.yml              # OIDC-based CI/CD with what-if on PR
 ```
+
+---
+
+## 📚 Documentation
+
+The README above is the deployment guide. For deeper reference on a specific area:
+
+| Guide | Read this when… |
+| --- | --- |
+| [Manual setup checklist](docs/manual-checklist.md) | You want a tickable / printable version of the [Deployment guide](#deployment-guide) above. |
+| [Parameters reference](docs/parameters-reference.md) | You want the per-parameter source-of-truth for `main.bicepparam` (file / env var / CI override). |
+| [Prerequisite resources (Key Vault + storage)](docs/prereq-resources.md) | You want to provision the prereq Key Vault and DSC storage account automatically instead of pre-creating them by hand. |
+| [Choosing your gateway FQDN](docs/gateway-fqdn.md) | Deciding between the free Azure LB hostname (lab only) and a vanity CNAME (production). |
+| [Key Vault prep](docs/key-vault-cert.md) | Setting up the TLS cert for the four RDS roles — vault RBAC, CSR/PFX import/self-signed flows, and renewal. |
+| [Manual deploy (escape hatch)](docs/manual-deploy.md) | What the deployment does end-to-end (12 steps), plus the underlying `az` commands when CI is unavailable. |
+| [CI/CD with GitHub Actions](docs/ci-cd.md) | Wiring up the included `.github/workflows/deploy.yml` (OIDC federated creds, RBAC, env approval). |
+| [Testing & verification](docs/testing.md) | Five-stage smoke tests from pre-deploy `what-if` to end-to-end client RDP. |
+| [Troubleshooting](docs/troubleshooting.md) | "Why doesn't this work?" — failures grouped by tier with the most likely fix. |
 
 ---
 

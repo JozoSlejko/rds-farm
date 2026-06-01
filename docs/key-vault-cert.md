@@ -2,7 +2,13 @@
 
 [← Back to main README](../README.md)
 
+> [!NOTE]
+> **Where this fits in the tier model.** This entire page is **Tier 0** — runs once, before your first pipeline / laptop deploy. [Renewal](#certificate-renewal) is occasional Tier 2 work (Key Vault VM extension picks up new versions automatically; only `Set-RDCertificate` rebinding needs a DSC re-apply). The pipeline's `pre-deploy-checks` job verifies your cert is exportable and not expiring within 30 days on every run.
+
 This guide walks you through getting a TLS cert into Key Vault so the deployment can bind it to all four RDS roles (`RDGateway`, `RDWebAccess`, `RDPublishing`, `RDRedirector`) automatically. Pick your gateway hostname first per [Choosing your gateway FQDN](./gateway-fqdn.md) — the cert Subject must match it exactly.
+
+> [!TIP]
+> **The typical entry point is [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)**, which provisions the Key Vault (via [`prereqs/main.bicep`](../prereqs/main.bicep)), creates the cert (via [`scripts/New-RdsCertificate.ps1`](../scripts/New-RdsCertificate.ps1)), and patches `main.bicepparam` in one orchestrated run. Read this page when you need to understand *what* it's doing — or when you're renewing / re-issuing a cert outside the bootstrap.
 
 ## What kind of certificate do I need?
 

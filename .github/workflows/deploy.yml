@@ -410,17 +410,77 @@ jobs:
           az group create -n "$AZURE_RESOURCE_GROUP" -l "$AZURE_LOCATION" -o none
 
       - name: Bicep what-if
+        id: whatif
         env:
           DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
           LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
           ARTIFACTS_SAS: ${{ needs.upload-artifacts.outputs.artifacts_sas }}
           ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
         run: |
+          set -euo pipefail
+          # Capture output so we can both stream it AND reuse it for the
+          # job summary + PR comment. `tee` keeps the console output
+          # readable for anyone watching the run live.
           az deployment group what-if \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --template-file  "$BICEP_FILE" \
             --parameters     "$BICEPPARAM_FILE" \
-            --parameters     artifactsLocation="$ARTIFACTS_LOCATION"
+            --parameters     artifactsLocation="$ARTIFACTS_LOCATION" \
+            2>&1 | tee whatif.txt
+
+      - name: Append what-if to job summary
+        if: always() && hashFiles('whatif.txt') != ''
+        run: |
+          {
+            echo "## What-if plan"
+            echo ""
+            echo '```'
+            cat whatif.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post what-if as PR comment
+        if: github.event_name == 'pull_request' && hashFiles('whatif.txt') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO:      ${{ github.repository }}
+          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- rds-farm-whatif -->'
+
+          # Build the comment body (collapsed by default so long plans don't
+          # spam the PR conversation).
+          {
+            echo "$MARKER"
+            echo "### What-if plan for \`$AZURE_RESOURCE_GROUP\`"
+            echo ""
+            echo "Run: [\`${{ github.run_id }}\`]($RUN_URL)"
+            echo ""
+            echo "<details><summary>Click to expand resource diff</summary>"
+            echo ""
+            echo '```'
+            # Trim to 60 KB so we stay under GitHub's 65 KB comment cap.
+            head -c 61440 whatif.txt
+            if [ "$(wc -c < whatif.txt)" -gt 61440 ]; then
+              echo ""
+              echo "... (truncated; see [job summary]($RUN_URL) for full output)"
+            fi
+            echo '```'
+            echo ""
+            echo "</details>"
+          } > whatif-comment.md
+
+          # Upsert: delete prior bot comments that carry our marker, then post fresh.
+          PRIOR_IDS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\") | select(.body | contains(\"$MARKER\")) | .id" \
+            || true)
+          for ID in $PRIOR_IDS; do
+            gh api -X DELETE "repos/$REPO/issues/comments/$ID" || true
+          done
+
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file whatif-comment.md
 
   deploy:
     name: Deploy
