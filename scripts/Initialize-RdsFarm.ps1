@@ -86,8 +86,13 @@
     egress IPs only — NEVER '0.0.0.0/0'. Required.
 
 .PARAMETER PublicGatewayFqdn
-    Public hostname clients will type (e.g. 'rds.contoso.com'). Required.
-    Must match the TLS certificate Subject / SAN.
+    Public hostname clients will type. Required for -CertMode Csr / ImportPfx
+    (a vanity FQDN you own, e.g. 'rds.contoso.com' — must match the cert
+    Subject / SAN). Optional for -CertMode SelfSigned: leave it empty and the
+    script derives the Azure-managed LB hostname
+    '<GatewayDnsLabelPrefix>.<Location>.cloudapp.azure.com' for you. Public
+    CAs cannot sign for 'cloudapp.azure.com' (Microsoft owns it) so a vanity
+    FQDN is still required outside the self-signed lab path.
 
 .PARAMETER GatewayDnsLabelPrefix
     Globally unique DNS label for the Azure-managed PIP hostname
@@ -236,8 +241,13 @@ function Assert-Tool {
 function Read-RequiredString {
     param(
         [string]$Prompt,
-        [string]$Default
+        [string]$Default,
+        [string[]]$Hint
     )
+    if ($Hint) {
+        Write-Host ''
+        foreach ($line in $Hint) { Write-Host "    $line" -ForegroundColor DarkGray }
+    }
     $suffix = if ($Default) { " [$Default]" } else { '' }
     while ($true) {
         $value = Read-Host -Prompt "  $Prompt$suffix"
@@ -248,7 +258,14 @@ function Read-RequiredString {
 }
 
 function Read-RequiredStringArray {
-    param([string]$Prompt)
+    param(
+        [string]$Prompt,
+        [string[]]$Hint
+    )
+    if ($Hint) {
+        Write-Host ''
+        foreach ($line in $Hint) { Write-Host "    $line" -ForegroundColor DarkGray }
+    }
     while ($true) {
         $raw = Read-Host -Prompt "  $Prompt (comma- or space-separated)"
         $items = $raw -split '[,\s]+' | Where-Object { $_ }
@@ -411,31 +428,133 @@ foreach ($p in @($initCi, $newCert, $prereqs)) {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==> Step 1: Collect inputs" -ForegroundColor Green
+Write-Host "    Anything you didn't pass on the command line is asked for here."
 Write-Host "    Press Enter to accept the bracketed default. Required fields keep asking until filled."
 Write-Host ""
 
-if (-not $AdDomainName)              { $AdDomainName              = Read-RequiredString -Prompt 'AD domain name (e.g. contoso.local)' }
-if (-not $AdDnsServerIp)             { $AdDnsServerIp             = Read-RequiredString -Prompt 'AD DNS server IP (e.g. 10.10.0.4)' }
-if (-not $ExistingVnetName)          { $ExistingVnetName          = Read-RequiredString -Prompt 'Existing VNet name' }
-if (-not $ExistingVnetResourceGroup) { $ExistingVnetResourceGroup = Read-RequiredString -Prompt 'Resource group of the VNet' }
-if (-not $ExistingRdsSubnetName)     { $ExistingRdsSubnetName     = Read-RequiredString -Prompt 'Subnet name for RDS VMs' }
+if (-not $AdDomainName) {
+    $AdDomainName = Read-RequiredString `
+        -Prompt 'AD domain name (e.g. contoso.local)' `
+        -Hint @(
+            'Existing Active Directory forest/domain the new VMs will join.',
+            'Use the FQDN your DCs report (e.g. contoso.local, ad.contoso.com).'
+        )
+}
+if (-not $AdDnsServerIp) {
+    $AdDnsServerIp = Read-RequiredString `
+        -Prompt 'AD DNS server IP (e.g. 10.10.0.4)' `
+        -Hint @(
+            'IP of a Domain Controller the new VMs can reach for DNS resolution.',
+            'Set as the subnet DNS so domain-join works during VM bootstrap.'
+        )
+}
+if (-not $ExistingVnetName) {
+    $ExistingVnetName = Read-RequiredString `
+        -Prompt 'Existing VNet name' `
+        -Hint 'Name of the pre-existing VNet that hosts the RDS subnet (this script never creates it).'
+}
+if (-not $ExistingVnetResourceGroup) {
+    $ExistingVnetResourceGroup = Read-RequiredString `
+        -Prompt 'Resource group of the VNet' `
+        -Hint 'Resource group where the existing VNet lives (often different from the farm RG).'
+}
+if (-not $ExistingRdsSubnetName) {
+    $ExistingRdsSubnetName = Read-RequiredString `
+        -Prompt 'Subnet name for RDS VMs' `
+        -Hint @(
+            'Subnet inside the VNet above where the gateway + session-host VMs will land.',
+            'Must have line-of-sight to the DC and outbound internet for the DSC extension.'
+        )
+}
 if (-not $AllowedClientSourceAddressPrefixes) {
-    $AllowedClientSourceAddressPrefixes = Read-RequiredStringArray -Prompt 'Allowed client source CIDRs (NEVER 0.0.0.0/0)'
+    $AllowedClientSourceAddressPrefixes = Read-RequiredStringArray `
+        -Prompt 'Allowed client source CIDRs (NEVER 0.0.0.0/0)' `
+        -Hint @(
+            'CIDRs allowed to reach the public LB on TCP 443 (RD Web / Gateway) and UDP 3391 (RDP UDP).',
+            'Use your office / VPN egress ranges. Open internet (0.0.0.0/0) is rejected.'
+        )
 }
-if (-not $PublicGatewayFqdn)         { $PublicGatewayFqdn         = Read-RequiredString -Prompt 'Public gateway FQDN (e.g. rds.contoso.com)' }
-if (-not (Test-FqdnFormat $PublicGatewayFqdn)) {
-    throw "PublicGatewayFqdn '$PublicGatewayFqdn' is not a valid DNS name. Expect 'rds.contoso.com', not bare hostnames, underscores, or labels longer than 63 chars."
-}
-if (-not $GatewayDnsLabelPrefix)     { $GatewayDnsLabelPrefix     = Read-RequiredString -Prompt 'Gateway DNS label (Azure PIP, globally unique)' -Default (Get-DefaultDnsLabel $PublicGatewayFqdn) }
-if (-not $ArtifactsStorageAccount)   { $ArtifactsStorageAccount   = Read-RequiredString -Prompt 'Artifacts storage account name (3-24 chars, lowercase, globally unique)' }
-if (-not $KeyVaultName)              { $KeyVaultName              = Read-RequiredString -Prompt 'Key Vault name (3-24 chars, globally unique)' }
+
+# Cert mode is gathered BEFORE the FQDN so the FQDN prompt can branch on it:
+# SelfSigned lets you skip -PublicGatewayFqdn entirely and use the Azure-
+# managed LB hostname; Csr / ImportPfx require a vanity FQDN you own (public
+# CAs cannot sign for cloudapp.azure.com).
 if (-not $CertMode) {
-    $modeRaw = Read-RequiredString -Prompt 'Cert mode (Csr / ImportPfx / SelfSigned)' -Default 'SelfSigned'
+    $modeRaw = Read-RequiredString `
+        -Prompt 'Cert mode (Csr / ImportPfx / SelfSigned)' `
+        -Default 'SelfSigned' `
+        -Hint @(
+            'Csr        = production. Script emits a CSR; you submit to your CA; re-run to merge the signed cert.',
+            'ImportPfx  = production. You supply an existing .pfx already issued by a publicly-trusted CA.',
+            'SelfSigned = lab/dev only. Script generates the cert in Key Vault. Clients will see a trust warning.'
+        )
     if ($modeRaw -notin @('Csr','ImportPfx','SelfSigned')) { throw "Invalid -CertMode '$modeRaw'." }
     $CertMode = $modeRaw
 }
 if ($CertMode -eq 'ImportPfx' -and -not $PfxPath) {
-    $PfxPath = Read-RequiredString -Prompt 'Path to .pfx file'
+    $PfxPath = Read-RequiredString `
+        -Prompt 'Path to .pfx file' `
+        -Hint 'Full path to the existing .pfx. The cert password is prompted separately as a SecureString.'
+}
+
+if ($CertMode -eq 'SelfSigned' -and -not $PublicGatewayFqdn) {
+    # Lab path: derive the FQDN from the Azure-managed LB hostname. The DNS
+    # label has to come first because there's no vanity FQDN to default it
+    # from. Pre-fill from the GitHub repo name as a hint.
+    if (-not $GatewayDnsLabelPrefix) {
+        $labelHint = Get-DefaultDnsLabel ($GitHubRepo -split '/')[-1]
+        $GatewayDnsLabelPrefix = Read-RequiredString `
+            -Prompt 'Gateway DNS label (Azure PIP, globally unique)' `
+            -Default $labelHint `
+            -Hint @(
+                "Globally-unique label for the Azure-managed public IP. Final hostname will be:",
+                "  <label>.$Location.cloudapp.azure.com",
+                'SelfSigned lab path: this hostname is also written as the cert subject (no vanity FQDN needed).'
+            )
+    }
+    $PublicGatewayFqdn = "$GatewayDnsLabelPrefix.$Location.cloudapp.azure.com".ToLowerInvariant()
+    Write-Host "    Using Azure-managed LB FQDN  : $PublicGatewayFqdn" -ForegroundColor DarkGray
+} else {
+    # Vanity FQDN path (Csr / ImportPfx, or SelfSigned with a vanity FQDN
+    # explicitly passed in).
+    if (-not $PublicGatewayFqdn) {
+        $PublicGatewayFqdn = Read-RequiredString `
+            -Prompt 'Public gateway FQDN (e.g. rds.contoso.com)' `
+            -Hint @(
+                'Vanity hostname your users will type into the RD client / browser.',
+                'Must be a DNS name you own. Will become the cert Subject/SAN and the CNAME target after deploy.'
+            )
+    }
+    if (-not (Test-FqdnFormat $PublicGatewayFqdn)) {
+        throw "PublicGatewayFqdn '$PublicGatewayFqdn' is not a valid DNS name. Expect 'rds.contoso.com', not bare hostnames, underscores, or labels longer than 63 chars."
+    }
+    if (-not $GatewayDnsLabelPrefix) {
+        $GatewayDnsLabelPrefix = Read-RequiredString `
+            -Prompt 'Gateway DNS label (Azure PIP, globally unique)' `
+            -Default (Get-DefaultDnsLabel $PublicGatewayFqdn) `
+            -Hint @(
+                "Label for the Azure-managed public IP. Your vanity FQDN will CNAME to:",
+                "  <label>.$Location.cloudapp.azure.com",
+                'Must be globally unique within the region. Default is derived from your vanity FQDN.'
+            )
+    }
+}
+
+if (-not $ArtifactsStorageAccount) {
+    $ArtifactsStorageAccount = Read-RequiredString `
+        -Prompt 'Artifacts storage account name (3-24 chars, lowercase, globally unique)' `
+        -Hint @(
+            'Storage account that hosts Configuration.zip (the DSC artifact) for the VM extension.',
+            'Created by the prereqs Bicep if it does not already exist. Reused on re-runs.'
+        )
+}
+if (-not $KeyVaultName) {
+    $KeyVaultName = Read-RequiredString `
+        -Prompt 'Key Vault name (3-24 chars, globally unique)' `
+        -Hint @(
+            'Key Vault that stores the TLS cert. VMs read it at boot via their managed identity.',
+            'Created by the prereqs Bicep if it does not already exist. Reused on re-runs.'
+        )
 }
 
 $certificateSubject = "CN=$PublicGatewayFqdn"

@@ -140,8 +140,8 @@ Required values are marked **yes**. Anything else has a sensible default — omi
 | `-ExistingVnetResourceGroup` | **yes** | — | Resource group of the existing VNet. |
 | `-ExistingRdsSubnetName` | **yes** | — | Subnet for the RDS VMs. |
 | `-AllowedClientSourceAddressPrefixes` | **yes** | — | `string[]` of CIDRs allowed to reach TCP 443 / UDP 3391. **Never `0.0.0.0/0`.** |
-| `-PublicGatewayFqdn` | **yes** *(use vanity FQDN; omit only for `*.cloudapp.azure.com` lab path)* | — | Public hostname clients type. Must match the TLS cert Subject / SAN. |
-| `-GatewayDnsLabelPrefix` | no | sanitised `-PublicGatewayFqdn` | DNS label for the Azure-managed PIP hostname. Must be globally unique. |
+| `-PublicGatewayFqdn` | **yes** for `Csr` / `ImportPfx` — optional for `SelfSigned` | for `SelfSigned`, derived from `-GatewayDnsLabelPrefix` + `-Location` as `<label>.<region>.cloudapp.azure.com` | Public hostname clients type. Must match the TLS cert Subject / SAN. Public CAs cannot sign for `cloudapp.azure.com`, so a vanity FQDN is required outside the self-signed lab path. |
+| `-GatewayDnsLabelPrefix` | **yes** for `SelfSigned` without `-PublicGatewayFqdn`, otherwise no | sanitised `-PublicGatewayFqdn` (vanity path) / from the repo name (lab path, prompted) | DNS label for the Azure-managed PIP hostname. Must be globally unique. |
 | `-ArtifactsStorageAccount` | **yes** | — | Globally unique storage account name (3–24 chars, lowercase alphanumeric) for `Configuration.zip`. |
 | `-KeyVaultName` | **yes** | — | Globally unique Key Vault name (3–24 chars) for the TLS cert. |
 | `-ArtifactsResourceGroup` | no | `rds-artifacts-rg` | RG for the artifacts SA. |
