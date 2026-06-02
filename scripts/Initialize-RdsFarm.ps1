@@ -144,6 +144,14 @@
     artifacts SA + Key Vault and pass their names via -ArtifactsStorageAccount
     and -KeyVaultName.
 
+.PARAMETER Interactive
+    Switch. Also prompt for every OPTIONAL parameter (subscription, location,
+    domain-join account, OU path, RG names, cert name, app display name, the
+    three -Skip* / -RequireProductionApproval switches, etc.), pre-filling the
+    current value as the bracketed default. Press Enter to keep each default.
+    Without this switch the script only asks for the required values and
+    silently uses defaults for everything else.
+
 .EXAMPLE
     # Fully scripted (CI/CD-friendly, prompts only for passwords)
     .\scripts\Initialize-RdsFarm.ps1 `
@@ -163,6 +171,10 @@
 .EXAMPLE
     # Interactive lab setup — script prompts for every missing required value.
     .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm-lab' -CertMode SelfSigned
+
+.EXAMPLE
+    # Guided tour — also prompts for every optional value (defaults pre-filled).
+    .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm-lab' -Interactive
 
 .NOTES
     Required tooling on the machine running this script:
@@ -221,7 +233,10 @@ param(
     # File + skip toggles
     [string]$BicepParamFile = (Join-Path $PSScriptRoot '..' 'main.bicepparam'),
     [switch]$SkipCiBootstrap,
-    [switch]$SkipPrereqsDeploy
+    [switch]$SkipPrereqsDeploy,
+
+    # UX
+    [switch]$Interactive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -271,6 +286,53 @@ function Read-RequiredStringArray {
         $items = $raw -split '[,\s]+' | Where-Object { $_ }
         if ($items) { return ,$items }
         Write-Host "    At least one value required." -ForegroundColor Yellow
+    }
+}
+
+function Read-OptionalString {
+    <#
+        Used by -Interactive mode for parameters that already have a default
+        (or that legitimately may be empty, e.g. DomainJoinOuPath). Press Enter
+        to keep $Default; type a new value to override. Always returns a string
+        (never $null), so '' is a valid "keep empty" answer.
+    #>
+    param(
+        [string]$Prompt,
+        [string]$Default,
+        [string[]]$Hint
+    )
+    if ($Hint) {
+        Write-Host ''
+        foreach ($line in $Hint) { Write-Host "    $line" -ForegroundColor DarkGray }
+    }
+    $suffix = if ($Default) { " [$Default]" } else { ' [empty]' }
+    $value  = Read-Host -Prompt "  $Prompt$suffix"
+    if ([string]::IsNullOrEmpty($value)) { return $Default }
+    return $value
+}
+
+function Read-OptionalSwitch {
+    <#
+        Yes/no prompt for -Interactive mode. Pressing Enter keeps $Default.
+        Accepts y/yes/true/1 and n/no/false/0 (case-insensitive). The capital
+        letter in the [Y/n] / [y/N] hint indicates the current default.
+    #>
+    param(
+        [string]$Prompt,
+        [bool]$Default,
+        [string[]]$Hint
+    )
+    if ($Hint) {
+        Write-Host ''
+        foreach ($line in $Hint) { Write-Host "    $line" -ForegroundColor DarkGray }
+    }
+    $defLabel = if ($Default) { 'Y/n' } else { 'y/N' }
+    while ($true) {
+        $value = Read-Host -Prompt "  $Prompt [$defLabel]"
+        if ([string]::IsNullOrEmpty($value)) { return $Default }
+        if ($value -match '^(y|yes|true|1)$')  { return $true }
+        if ($value -match '^(n|no|false|0)$')  { return $false }
+        Write-Host "    Please answer y or n." -ForegroundColor Yellow
     }
 }
 
@@ -428,9 +490,116 @@ foreach ($p in @($initCi, $newCert, $prereqs)) {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==> Step 1: Collect inputs" -ForegroundColor Green
-Write-Host "    Anything you didn't pass on the command line is asked for here."
+if ($Interactive) {
+    Write-Host "    -Interactive mode: also prompting for every OPTIONAL parameter (defaults pre-filled)." -ForegroundColor Yellow
+} else {
+    Write-Host "    Anything you didn't pass on the command line is asked for here."
+    Write-Host "    (Tip: re-run with -Interactive to also be prompted for every optional value.)"
+}
 Write-Host "    Press Enter to accept the bracketed default. Required fields keep asking until filled."
 Write-Host ""
+
+# -------------------------------------------------------------------------
+# Interactive optionals — every parameter with a built-in default. Each
+# prompt pre-fills the current value as the [bracketed] default, so a
+# pure 'Enter, Enter, Enter…' run is equivalent to a non-interactive
+# call. Skipped entirely when -Interactive is not set.
+# -------------------------------------------------------------------------
+if ($Interactive) {
+    Write-Host "    --- Optional values (press Enter to keep default) -------------" -ForegroundColor DarkGray
+
+    # Subscription / region. The currently-signed-in subscription is the
+    # default; entering a different ID or name re-runs `az account set`
+    # and refreshes $ctx so the rest of the script targets the new sub.
+    $subAnswer = Read-OptionalString `
+        -Prompt 'Subscription (ID or name)' `
+        -Default $ctx.name `
+        -Hint 'Target Azure subscription. Default is the one az is currently signed into.'
+    if ($subAnswer -and $subAnswer -ne $ctx.name -and $subAnswer -ne $ctx.id) {
+        az account set --subscription $subAnswer | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to switch to subscription '$subAnswer'." }
+        $ctx            = az account show -o json | ConvertFrom-Json
+        $SubscriptionId = $ctx.id
+        $TenantId       = $ctx.tenantId
+        Write-Host "    Switched subscription: $($ctx.name) ($SubscriptionId)" -ForegroundColor DarkGray
+    }
+
+    $Location = Read-OptionalString `
+        -Prompt 'Azure region' `
+        -Default $Location `
+        -Hint 'Region for the prereq RGs (KV + storage) and the farm RG.'
+
+    # AD identity defaults
+    $DomainJoinUserName = Read-OptionalString `
+        -Prompt 'Domain-join service account (sAMAccountName)' `
+        -Default $DomainJoinUserName `
+        -Hint 'Pre-created AD account used by the JoinDomain DSC resource (password supplied via $env:DOMAIN_JOIN_PASSWORD).'
+
+    $DomainJoinOuPath = Read-OptionalString `
+        -Prompt 'Domain-join target OU (DN, empty = default Computers container)' `
+        -Default $DomainJoinOuPath `
+        -Hint @(
+            "Distinguished Name of the OU the new VM computer objects land in.",
+            "Empty = AD's default Computers container. Example: OU=RDS,OU=Servers,DC=contoso,DC=local.",
+            'The domain-join account needs Create Computer Objects on that OU.'
+        )
+
+    $LocalAdminUserName = Read-OptionalString `
+        -Prompt 'Local admin username (on every RDS VM)' `
+        -Default $LocalAdminUserName `
+        -Hint 'Local administrator account baked into every VM (password supplied via $env:LOCAL_ADMIN_PASSWORD).'
+
+    $RdsAccessGroup = Read-OptionalString `
+        -Prompt 'AD group allowed to use RD Web + RD Gateway' `
+        -Default $RdsAccessGroup `
+        -Hint 'Members of this AD security group may sign in to the farm. "Domain Users" works for labs.'
+
+    # Prereqs RG names
+    $ArtifactsResourceGroup = Read-OptionalString `
+        -Prompt 'Artifacts resource group' `
+        -Default $ArtifactsResourceGroup `
+        -Hint 'RG that holds the artifacts storage account (Configuration.zip).'
+
+    $KeyVaultResourceGroup = Read-OptionalString `
+        -Prompt 'Key Vault resource group' `
+        -Default $KeyVaultResourceGroup `
+        -Hint 'RG that holds the Key Vault storing the TLS cert.'
+
+    # Cert + CI bootstrap
+    $CertName = Read-OptionalString `
+        -Prompt 'TLS cert name in Key Vault' `
+        -Default $CertName `
+        -Hint 'Name of the cert object inside KV. Reused on re-runs to update an existing cert.'
+
+    $AppDisplayName = Read-OptionalString `
+        -Prompt 'Entra app display name (for GitHub OIDC)' `
+        -Default $AppDisplayName `
+        -Hint 'Display name of the Entra app the GitHub Actions workflow logs in as via federated credentials.'
+
+    $RequireProductionApproval = [bool] (Read-OptionalSwitch `
+        -Prompt 'Require approval on the production GitHub environment?' `
+        -Default $RequireProductionApproval.IsPresent `
+        -Hint 'Adds yourself as the required reviewer for deploys to production. Needs GH Pro/Team/Enterprise on private repos.')
+
+    # File + skip toggles
+    $BicepParamFile = Read-OptionalString `
+        -Prompt 'Path to main.bicepparam to patch' `
+        -Default $BicepParamFile `
+        -Hint 'The script patches network/AD/gateway values into this file. Defaults to <repo>/main.bicepparam.'
+
+    $SkipCiBootstrap = [bool] (Read-OptionalSwitch `
+        -Prompt 'Skip CI bootstrap (Entra app + federated creds + GitHub secrets)?' `
+        -Default $SkipCiBootstrap.IsPresent `
+        -Hint 'Set Y when Initialize-CiPrerequisites.ps1 has already run successfully against this repo.')
+
+    $SkipPrereqsDeploy = [bool] (Read-OptionalSwitch `
+        -Prompt 'Skip prereqs Bicep (KV + storage account creation)?' `
+        -Default $SkipPrereqsDeploy.IsPresent `
+        -Hint 'Set Y only when KV + SA already exist and you pass -ArtifactsStorageAccount / -KeyVaultName.')
+
+    Write-Host "    --- End optional values ---------------------------------------" -ForegroundColor DarkGray
+    Write-Host ''
+}
 
 if (-not $AdDomainName) {
     $AdDomainName = Read-RequiredString `
@@ -579,9 +748,9 @@ Write-Host "    Artifacts SA                 : $ArtifactsStorageAccount (RG $Art
 Write-Host "    Key Vault                    : $KeyVaultName (RG $KeyVaultResourceGroup)"
 Write-Host "    Cert mode                    : $CertMode$(if ($PfxPath) { "  (pfx=$PfxPath)" })"
 Write-Host "    Entra app display name       : $AppDisplayName"
-Write-Host "    Production approval required : $($RequireProductionApproval.IsPresent)"
-Write-Host "    Skip CI bootstrap            : $($SkipCiBootstrap.IsPresent)"
-Write-Host "    Skip prereqs Bicep deploy    : $($SkipPrereqsDeploy.IsPresent)"
+Write-Host "    Production approval required : $([bool]$RequireProductionApproval)"
+Write-Host "    Skip CI bootstrap            : $([bool]$SkipCiBootstrap)"
+Write-Host "    Skip prereqs Bicep deploy    : $([bool]$SkipPrereqsDeploy)"
 Write-Host "    --------------------------------------------------------------"
 Write-Host ""
 

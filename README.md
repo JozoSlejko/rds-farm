@@ -117,7 +117,7 @@ A single script orchestrates everything Tier 0 needs. It calls the focused per-a
     -RequireProductionApproval
 ```
 
-Any required value you omit is prompted for interactively (with sensible defaults shown in brackets). Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -CertMode SelfSigned` — the script asks for the rest.
+Any required value you omit is prompted for interactively (with sensible defaults shown in brackets). Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -CertMode SelfSigned` — the script asks for the rest. Add `-Interactive` to also be prompted for every *optional* parameter (defaults pre-filled).
 
 In one pass it wires GitHub Actions, deploys the prereq Azure resources, issues the TLS cert in Key Vault, and writes a fully populated `main.bicepparam`. You don't hand-edit the bicepparam afterwards. Per-step breakdown: [`docs/manual-checklist.md`](docs/manual-checklist.md).
 
@@ -154,6 +154,7 @@ Required values are marked **yes**. Anything else has a sensible default — omi
 | `-BicepParamFile` | no | `<repo>/main.bicepparam` | Path to the bicepparam to patch. |
 | `-SkipCiBootstrap` | switch | off | Skip CI wiring (use only when `Initialize-CiPrerequisites.ps1` already ran successfully). |
 | `-SkipPrereqsDeploy` | switch | off | Skip the prereqs Bicep (use only when KV + SA already exist and you pass their names). |
+| `-Interactive` | switch | off | Also prompt for every **optional** parameter above (defaults pre-filled — press Enter to keep each). Without this switch only the required values are prompted; optionals silently use their defaults. |
 
 `Get-Help ./scripts/Initialize-RdsFarm.ps1 -Full` shows the same set with extended notes.
 
