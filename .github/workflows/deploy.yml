@@ -207,7 +207,6 @@ jobs:
       always()
       && needs.package-dsc.result == 'success'
       && (needs.prereqs.result == 'skipped' || (needs.prereqs.result == 'success' && inputs.prereqs_action != 'what-if'))
-    environment: ${{ github.event_name == 'pull_request' && 'preview' || 'production' }}
     env:
       # Prefer the storage account just created by the prereqs job; otherwise fall back to the repo variable.
       ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.prereqs.outputs.artifacts_storage_account || vars.ARTIFACTS_STORAGE_ACCOUNT }}
@@ -562,4 +561,3 @@ jobs:
             echo ""
             echo "See [docs/testing.md](../../docs/testing.md) for the manual checklist."
           } >> "$GITHUB_STEP_SUMMARY"
-
