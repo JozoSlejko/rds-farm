@@ -477,7 +477,7 @@ if (-not (Test-Path -LiteralPath $BicepParamFile -PathType Leaf)) {
 }
 Write-Host "    Bicepparam   : $BicepParamFile"
 
-$repoRoot = Split-Path -Parent (Split-Path -Parent $BicepParamFile)
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $initCi   = Join-Path $PSScriptRoot 'Initialize-CiPrerequisites.ps1'
 $newCert  = Join-Path $PSScriptRoot 'New-RdsCertificate.ps1'
 $prereqs  = Join-Path $repoRoot 'prereqs\main.bicep'
