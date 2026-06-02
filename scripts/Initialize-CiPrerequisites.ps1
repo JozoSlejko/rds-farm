@@ -17,7 +17,10 @@
            AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
            DOMAIN_JOIN_PASSWORD, LOCAL_ADMIN_PASSWORD
          Passwords are read with Read-Host -AsSecureString.
-      5. Optionally sets the ARTIFACTS_STORAGE_ACCOUNT repo variable.
+      5. Optionally sets the ARTIFACTS_STORAGE_ACCOUNT, AZURE_LOCATION, and
+         AZURE_RESOURCE_GROUP repo variables. The workflow's env: block reads
+         these (with sensible defaults) so the orchestrator's -Location and
+         -FarmResourceGroup choices actually flow into CI.
       6. Creates the 'preview' and 'production' GitHub environments.
 
     What this script does NOT do (intentional):
@@ -42,6 +45,16 @@
     run — the workflow will then carry the new SA name forward automatically,
     and you can set the variable afterwards so subsequent runs default to
     `prereqs_action: use-existing`.
+
+.PARAMETER Location
+    Optional. Azure region the workflow will deploy the farm RG into. When set,
+    written to GitHub as the AZURE_LOCATION repo variable. If omitted, the
+    workflow falls back to its hard-coded default ('westeurope').
+
+.PARAMETER FarmResourceGroup
+    Optional. Name of the resource group the workflow creates and deploys
+    main.bicep into. When set, written to GitHub as the AZURE_RESOURCE_GROUP
+    repo variable. If omitted, the workflow falls back to 'rds-farm-rg'.
 
 .PARAMETER RequireProductionApproval
     Switch. If set, the 'production' environment is created with the current
@@ -78,6 +91,10 @@ param(
     [string]$AppDisplayName = 'gh-rds-farm-deploy',
 
     [string]$ArtifactsStorageAccount,
+
+    [string]$Location,
+
+    [string]$FarmResourceGroup,
 
     [switch]$RequireProductionApproval,
 
@@ -281,14 +298,36 @@ try {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==> Step 5: GitHub repository variables" -ForegroundColor Green
+
+function Set-GhVariable {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][string]$Repo
+    )
+    gh variable set $Name --repo $Repo --body $Value
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set repo variable $Name." }
+    Write-Host "  Set repo variable $Name=$Value"
+}
+
 if ($ArtifactsStorageAccount) {
-    Write-Host "  Setting ARTIFACTS_STORAGE_ACCOUNT=$ArtifactsStorageAccount"
-    gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body $ArtifactsStorageAccount
-    if ($LASTEXITCODE -ne 0) { throw "Failed to set repo variable ARTIFACTS_STORAGE_ACCOUNT." }
+    Set-GhVariable -Name 'ARTIFACTS_STORAGE_ACCOUNT' -Value $ArtifactsStorageAccount -Repo $GitHubRepo
 } else {
     Write-Host "  -ArtifactsStorageAccount not provided." -ForegroundColor Yellow
     Write-Host "  Skip if you'll run 'prereqs_action: deploy-new' first; set this" -ForegroundColor Yellow
     Write-Host "  afterwards with the SA name printed in the workflow job summary." -ForegroundColor Yellow
+}
+
+if ($Location) {
+    Set-GhVariable -Name 'AZURE_LOCATION' -Value $Location -Repo $GitHubRepo
+} else {
+    Write-Host "  -Location not provided; workflow will use its default ('westeurope')." -ForegroundColor Yellow
+}
+
+if ($FarmResourceGroup) {
+    Set-GhVariable -Name 'AZURE_RESOURCE_GROUP' -Value $FarmResourceGroup -Repo $GitHubRepo
+} else {
+    Write-Host "  -FarmResourceGroup not provided; workflow will use its default ('rds-farm-rg')." -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------------------

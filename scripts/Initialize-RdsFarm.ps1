@@ -236,6 +236,7 @@ param(
     [string]$KeyVaultName,
     [string]$ArtifactsResourceGroup = 'rds-artifacts-rg',
     [string]$KeyVaultResourceGroup  = 'rds-security-rg',
+    [string]$FarmResourceGroup      = 'rds-farm-rg',
 
     # TLS cert
     [ValidateSet('Csr','ImportPfx','SelfSigned')]
@@ -490,7 +491,7 @@ $script:RdsFarmInitConfigSections = @(
     @{ Title = 'Active Directory'    ; Params = @('AdDomainName','AdDnsServerIp','DomainJoinUserName','DomainJoinOuPath','LocalAdminUserName','RdsAccessGroup') }
     @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes') }
     @{ Title = 'Gateway hostname'    ; Params = @('PublicGatewayFqdn','GatewayDnsLabelPrefix') }
-    @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup') }
+    @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
     @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName') }
     @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
     @{ Title = 'File + skip toggles' ; Params = @('BicepParamFile','SkipCiBootstrap','SkipPrereqsDeploy') }
@@ -735,6 +736,11 @@ if ($Interactive) {
         -Default $KeyVaultResourceGroup `
         -Hint 'RG that holds the Key Vault storing the TLS cert.'
 
+    $FarmResourceGroup = Read-OptionalString `
+        -Prompt 'Farm resource group (where the workflow deploys VMs/LB/NSG)' `
+        -Default $FarmResourceGroup `
+        -Hint 'RG the GitHub Actions workflow creates and runs main.bicep into. Written to GitHub as the AZURE_RESOURCE_GROUP repo variable.'
+
     # Cert + CI bootstrap
     $CertName = Read-OptionalString `
         -Prompt 'TLS cert name in Key Vault' `
@@ -958,6 +964,7 @@ Write-Host "    Cert subject                 : $certificateSubject"
 Write-Host "    Azure PIP DNS label          : $GatewayDnsLabelPrefix.$Location.cloudapp.azure.com"
 Write-Host "    Artifacts SA                 : $ArtifactsStorageAccount (RG $ArtifactsResourceGroup)"
 Write-Host "    Key Vault                    : $KeyVaultName (RG $KeyVaultResourceGroup)"
+Write-Host "    Farm RG (deploy target)      : $FarmResourceGroup ($Location)"
 Write-Host "    Cert mode                    : $CertMode$(if ($PfxPath) { "  (pfx=$PfxPath)" })"
 Write-Host "    Entra app display name       : $AppDisplayName"
 Write-Host "    Production approval required : $([bool]$RequireProductionApproval)"
@@ -1031,6 +1038,11 @@ if (-not $SkipCiBootstrap) {
     # Step 7 below still calls 'gh variable set' to keep things idempotent
     # (and to update the value if the prereqs deploy renames the SA).
     if ($ArtifactsStorageAccount) { $ciArgs['ArtifactsStorageAccount'] = $ArtifactsStorageAccount }
+    # Push Location + FarmResourceGroup to GitHub repo variables so the
+    # workflow's env: block picks them up (otherwise main.bicep deploys into
+    # the workflow's hard-coded defaults, not the region you chose here).
+    if ($Location)                { $ciArgs['Location']                = $Location }
+    if ($FarmResourceGroup)       { $ciArgs['FarmResourceGroup']       = $FarmResourceGroup }
     if ($RequireProductionApproval) { $ciArgs['RequireProductionApproval'] = $true }
 
     & $initCi @ciArgs
@@ -1211,13 +1223,23 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Set ARTIFACTS_STORAGE_ACCOUNT repo variable
+# 7. Set GitHub repo variables consumed by .github/workflows/deploy.yml.
 # ---------------------------------------------------------------------------
+# These are the ONLY way the orchestrator's -Location / -FarmResourceGroup
+# choices reach the CI workflow — deploy.yml's env: block reads vars.* with
+# hard-coded fallbacks. Repeat the writes here (Step 2 already did them) so
+# rerunning the orchestrator after editing the saved config updates them.
 Write-Host ""
-Write-Host "==> Step 7: GitHub repo variable" -ForegroundColor Green
-Write-Host "    Setting ARTIFACTS_STORAGE_ACCOUNT=$ArtifactsStorageAccount"
-gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body $ArtifactsStorageAccount
-if ($LASTEXITCODE -ne 0) { throw "Failed to set repo variable ARTIFACTS_STORAGE_ACCOUNT." }
+Write-Host "==> Step 7: GitHub repo variables" -ForegroundColor Green
+function Set-RepoVar {
+    param([string]$Name, [string]$Value)
+    Write-Host "    Setting $Name=$Value"
+    gh variable set $Name --repo $GitHubRepo --body $Value
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set repo variable $Name." }
+}
+Set-RepoVar 'ARTIFACTS_STORAGE_ACCOUNT' $ArtifactsStorageAccount
+Set-RepoVar 'AZURE_LOCATION'            $Location
+Set-RepoVar 'AZURE_RESOURCE_GROUP'      $FarmResourceGroup
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -1225,6 +1247,7 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to set repo variable ARTIFACTS_STORAGE_
 Write-Host ""
 Write-Host "==================== Tier 0 complete ====================" -ForegroundColor Green
 Write-Host "  Prereqs RGs       : $ArtifactsResourceGroup / $KeyVaultResourceGroup"
+Write-Host "  Farm RG / region  : $FarmResourceGroup / $Location"
 Write-Host "  Artifacts SA      : $ArtifactsStorageAccount"
 Write-Host "  Key Vault         : $KeyVaultName"
 Write-Host "  TLS cert          : $CertName (Subject=$certificateSubject)"

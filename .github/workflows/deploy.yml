@@ -34,8 +34,12 @@ permissions:
   pull-requests: write
 
 env:
-  AZURE_LOCATION: westeurope
-  AZURE_RESOURCE_GROUP: rds-farm-rg
+  # AZURE_LOCATION + AZURE_RESOURCE_GROUP are sourced from repo variables that
+  # Initialize-RdsFarm.ps1 -> Initialize-CiPrerequisites.ps1 set from your
+  # chosen -Location and -FarmResourceGroup. The literals here are fallbacks
+  # so the workflow still runs against a never-bootstrapped repo.
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'westeurope' }}
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP || 'rds-farm-rg' }}
   ARTIFACTS_CONTAINER: dsc
   BICEP_FILE: main.bicep
   BICEPPARAM_FILE: main.bicepparam
