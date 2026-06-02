@@ -10,11 +10,6 @@ on:
         type: choice
         options: [what-if, deploy]
         default: what-if
-      prereqs_action:
-        description: 'Prereqs (Key Vault + DSC storage account): use existing, what-if, or deploy new'
-        type: choice
-        options: [use-existing, what-if, deploy-new]
-        default: use-existing
 
 permissions:
   id-token: write   # OIDC federated credential
@@ -92,78 +87,6 @@ jobs:
           LOCAL_ADMIN_PASSWORD: dummy-for-validation-only
         run: ./tests/Test-BicepParamValues.ps1
 
-  prereqs:
-    name: Prereqs (KV + Storage)
-    runs-on: ubuntu-latest
-    needs: [lint, config-tests]
-    if: github.event_name == 'workflow_dispatch' && inputs.prereqs_action != 'use-existing'
-    environment: ${{ inputs.prereqs_action == 'deploy-new' && 'production' || 'preview' }}
-    outputs:
-      artifacts_storage_account: ${{ steps.deploy.outputs.artifacts_storage_account }}
-      artifacts_location:        ${{ steps.deploy.outputs.artifacts_location }}
-      key_vault_name:            ${{ steps.deploy.outputs.key_vault_name }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Azure login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve CI service-principal object ID
-        id: spn
-        run: |
-          set -euo pipefail
-          SP_OID=$(az ad sp show --id "${{ secrets.AZURE_CLIENT_ID }}" --query id -o tsv)
-          echo "object_id=$SP_OID" >> "$GITHUB_OUTPUT"
-
-      - name: Prereqs what-if
-        if: inputs.prereqs_action == 'what-if'
-        run: |
-          set -euo pipefail
-          az deployment sub what-if \
-            --location       "$AZURE_LOCATION" \
-            --template-file  "$PREREQS_BICEP_FILE" \
-            --parameters     "$PREREQS_BICEPPARAM_FILE" \
-            --parameters     adminPrincipals='[{"id":"${{ steps.spn.outputs.object_id }}","type":"ServicePrincipal"}]'
-
-      - name: Prereqs deploy
-        id: deploy
-        if: inputs.prereqs_action == 'deploy-new'
-        run: |
-          set -euo pipefail
-          OUTPUTS=$(az deployment sub create \
-            --name           "prereqs-$(date -u +%Y%m%d-%H%M%S)" \
-            --location       "$AZURE_LOCATION" \
-            --template-file  "$PREREQS_BICEP_FILE" \
-            --parameters     "$PREREQS_BICEPPARAM_FILE" \
-            --parameters     adminPrincipals='[{"id":"${{ steps.spn.outputs.object_id }}","type":"ServicePrincipal"}]' \
-            --query properties.outputs -o json)
-
-          echo "$OUTPUTS"
-
-          SA=$(echo  "$OUTPUTS" | jq -r '.storageAccountName.value')
-          LOC=$(echo "$OUTPUTS" | jq -r '.artifactsLocation.value')
-          KV=$(echo  "$OUTPUTS" | jq -r '.keyVaultName.value')
-
-          {
-            echo "artifacts_storage_account=$SA"
-            echo "artifacts_location=$LOC"
-            echo "key_vault_name=$KV"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## Prereqs deployed"
-            echo ""
-            echo "- Storage account: \`$SA\`"
-            echo "- Artifacts URL:   $LOC"
-            echo "- Key Vault:       \`$KV\`"
-            echo ""
-            echo "> Update repo variable \`ARTIFACTS_STORAGE_ACCOUNT\` to \`$SA\` so the next CI run picks it up without needing to choose 'deploy-new' again."
-          } >> "$GITHUB_STEP_SUMMARY"
-
   package-dsc:
     name: Package DSC
     runs-on: ubuntu-latest
@@ -187,23 +110,25 @@ jobs:
   upload-artifacts:
     name: Upload DSC to storage
     runs-on: ubuntu-latest
-    needs: [package-dsc, prereqs]
-    # Run when:
-    #   - prereqs job succeeded (deploy-new), OR
-    #   - prereqs job was skipped (use-existing / non-dispatch events).
-    # Stop the chain when prereqs ran in what-if mode (it succeeded but the storage account doesn't exist).
-    if: |
-      always()
-      && needs.package-dsc.result == 'success'
-      && (needs.prereqs.result == 'skipped' || (needs.prereqs.result == 'success' && inputs.prereqs_action != 'what-if'))
+    needs: package-dsc
     env:
-      # Prefer the storage account just created by the prereqs job; otherwise fall back to the repo variable.
-      ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.prereqs.outputs.artifacts_storage_account || vars.ARTIFACTS_STORAGE_ACCOUNT }}
+      # The artifacts storage account is a Tier 0 prerequisite (provisioned
+      # by `scripts/Initialize-RdsFarm.ps1` from your laptop). The repo
+      # variable is set by that same script via `gh variable set`.
+      ARTIFACTS_STORAGE_ACCOUNT: ${{ vars.ARTIFACTS_STORAGE_ACCOUNT }}
     outputs:
       artifacts_location:        ${{ steps.publish.outputs.artifacts_location }}
       artifacts_storage_account: ${{ steps.publish.outputs.artifacts_storage_account }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate ARTIFACTS_STORAGE_ACCOUNT repo variable
+        run: |
+          if [ -z "${ARTIFACTS_STORAGE_ACCOUNT:-}" ]; then
+            echo "::error::Repo variable ARTIFACTS_STORAGE_ACCOUNT is not set. Run scripts/Initialize-RdsFarm.ps1 (Tier 0) to provision the artifacts storage account and wire the variable."
+            exit 1
+          fi
+          echo "[OK] ARTIFACTS_STORAGE_ACCOUNT=$ARTIFACTS_STORAGE_ACCOUNT"
 
       - name: Azure login (OIDC)
         uses: azure/login@v3
@@ -247,6 +172,22 @@ jobs:
 
       - name: Ensure resource group
         run: az group create -n "$AZURE_RESOURCE_GROUP" -l "$AZURE_LOCATION" -o none
+
+      - name: Tier 0 prerequisite resources exist
+        run: |
+          set -euo pipefail
+          # The artifacts SA and (when cert binding is enabled) the Key Vault
+          # are provisioned by scripts/Initialize-RdsFarm.ps1 from a laptop,
+          # not by this pipeline. Verify they're present before we burn time
+          # on VNet checks / what-if.
+          if ! az storage account show --name "$ARTIFACTS_STORAGE_ACCOUNT" -o none 2>/dev/null; then
+            echo "::error::Artifacts storage account '$ARTIFACTS_STORAGE_ACCOUNT' not found. Run scripts/Initialize-RdsFarm.ps1 (Tier 0) to provision it, or update the ARTIFACTS_STORAGE_ACCOUNT repo variable to point at an existing one."
+            exit 1
+          fi
+          echo "[OK] Artifacts storage account '$ARTIFACTS_STORAGE_ACCOUNT' exists"
+          # The KV check happens later in the cert-binding-specific step
+          # below (skipped when enableCertificateBinding=false, since the
+          # farm doesn't need a KV in that mode).
 
       - name: Resolve existing infra params from bicepparam
         id: params
@@ -358,7 +299,8 @@ jobs:
           set -euo pipefail
           # The SA has allowSharedKeyAccess=false and tenant policy forbids SAS,
           # so we use OAuth via --auth-mode login. The CI SP has Storage Blob
-          # Data Contributor on the SA (granted by the prereqs template).
+          # Data Contributor on the SA (granted by the Tier 0 bootstrap when
+          # scripts/Initialize-RdsFarm.ps1 runs prereqs/main.bicep).
           EXISTS=$(az storage blob exists \
             --account-name   "$ARTIFACTS_STORAGE_ACCOUNT" \
             --container-name "$ARTIFACTS_CONTAINER" \
@@ -390,12 +332,11 @@ jobs:
     name: What-If
     runs-on: ubuntu-latest
     needs: [upload-artifacts, pre-deploy-checks]
-    # Use always() to opt out of GitHub's implicit success() — which walks
-    # transitively and would treat the intentionally-skipped `prereqs`
-    # ancestor (via upload-artifacts.needs) as failure, silently skipping
-    # this job. Then explicitly require our two direct needs to have
-    # succeeded. Default-safe: anything that isn't an explicit 'deploy'
-    # falls through to what-if (guards against empty inputs on re-runs).
+    # always() opts out of GitHub's implicit success() (which walks the full
+    # upstream graph and treats any skipped ancestor as failure). We then
+    # explicitly require our two direct needs. Default-safe: anything that
+    # isn't an explicit 'deploy' falls through to what-if, which protects
+    # against re-runs that lose the original inputs payload.
     if: |
       always()
       && github.event_name == 'workflow_dispatch'
@@ -450,9 +391,10 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     needs: [upload-artifacts, pre-deploy-checks]
-    # always() opts out of GitHub's implicit success() (which would treat
-    # the intentionally-skipped `prereqs` ancestor as failure). We then
-    # require both direct needs to have succeeded.
+    # always() opts out of GitHub's implicit success() (see what-if note);
+    # then require both direct needs to have succeeded plus an explicit
+    # 'deploy' selection (no default fall-through here — deploys must be
+    # asked for).
     if: |
       always()
       && github.event_name == 'workflow_dispatch'

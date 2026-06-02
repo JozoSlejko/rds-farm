@@ -3,13 +3,14 @@
 [← Back to main README](../README.md)
 
 > [!NOTE]
-> **Where this fits in the tier model.** Running `prereqs/` is **Tier 0** (one-time provisioning) regardless of who triggers it:
+> **Where this fits in the tier model.** Running `prereqs/` is **Tier 0** (one-time provisioning) and is always done from a laptop — the CI pipeline never deploys this template:
 >
 > - **Via the orchestrator (recommended):** [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) deploys this template for you with `adminPrincipals` pre-populated. You don't edit `prereqs/main.bicepparam` at all.
-> - **From the pipeline:** trigger `Actions → Deploy RDS Farm → Run workflow` with `prereqs_action: deploy-new`. The CI service principal needs sub-scope `Contributor` + `RBAC Administrator` — both granted automatically by [`scripts/Initialize-CiPrerequisites.ps1`](../scripts/Initialize-CiPrerequisites.ps1).
 > - **From your laptop directly:** [Option 2](#option-2--manual-az-deployment-sub-create) below — useful for debugging or when you can't use the orchestrator.
 >
 > After this is done once, every subsequent farm deploy is **Tier 1** (pipeline or laptop via [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1)) and reads the resources it just created. See [README → Deployment guide](../README.md#deployment-guide).
+>
+> **Why isn't this in CI?** Sub-scope deployments need broader RBAC (sub-scope `Contributor` + `RBAC Administrator`) than a CI principal should normally hold. Keeping prereqs as a laptop-only operation lets the CI service principal stay narrowly scoped.
 
 This guide describes the optional **`prereqs/`** Bicep template that provisions the two Azure resources the main RDS farm needs but doesn't create itself:
 
@@ -42,24 +43,11 @@ It also creates the two resource groups that hold them and grants `Storage Blob 
 
 ## How to deploy
 
-### Option 1 — via the GitHub Actions pipeline (recommended)
+### Option 1 — via the orchestrator (recommended)
 
-The workflow exposes a `prereqs_action` choice:
+[`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) wraps the `az deployment sub create` call shown below, fills in `adminPrincipals` from `az ad signed-in-user show` + the SP it just created, and writes the resulting SA name to the `ARTIFACTS_STORAGE_ACCOUNT` repo variable via `gh variable set`. Use this whenever you can.
 
-- **`use-existing`** *(default)* — skip the prereqs job; the pipeline uses the existing `vars.ARTIFACTS_STORAGE_ACCOUNT` repo variable.
-- **`what-if`** — run `az deployment sub what-if` against [`prereqs/main.bicep`](../prereqs/main.bicep) and stop (don't run the rest of the pipeline).
-- **`deploy-new`** — run `az deployment sub create`, then carry the new storage account name forward into `upload-artifacts` automatically.
-
-In **Actions → Deploy RDS Farm → Run workflow**:
-
-| Combo | Result |
-| --- | --- |
-| `prereqs_action: deploy-new`, `action: what-if` | Create prereqs, then what-if the main farm (use this for first-run bootstrap) |
-| `prereqs_action: deploy-new`, `action: deploy` | One-shot bootstrap: create prereqs and the farm in a single run |
-| `prereqs_action: use-existing`, `action: deploy` | Normal recurring deploy (no prereq changes) |
-| `prereqs_action: what-if`, any `action` | Validate the prereqs template only; downstream jobs are skipped |
-
-After a successful `deploy-new` run, the job summary prints the new storage account name. **Update repo variable `ARTIFACTS_STORAGE_ACCOUNT`** so the default (`use-existing`) flow picks it up on the next push.
+After it finishes, the pipeline reads the storage account from the repo variable and the Key Vault from `main.bicepparam` — no other wiring required.
 
 ### Option 2 — manual `az deployment sub create`
 
@@ -119,5 +107,5 @@ You can pre-create the two resource groups out of band and grant the deployer on
    ```
 
 2. **Create or import the TLS cert.** Follow [Manual deploy → Step 3](./manual-deploy.md#3-create-the-tls-certificate-in-key-vault-only-if-tier-0-did-not) — Step 3a (RBAC mode + self-grant Certificates Officer) is already handled by this template.
-3. **Update `main.bicepparam`.** Set `keyVaultName`, `keyVaultResourceGroup`, and `keyVaultCertSecretUri` (the value the prereqs job prints in its summary).
-4. **Run the main farm deploy.** Either trigger the workflow with `prereqs_action: use-existing, action: deploy`, or `az deployment group create` manually per [Manual deploy (escape hatch)](./manual-deploy.md).
+3. **Update `main.bicepparam`.** Set `keyVaultName`, `keyVaultResourceGroup`, and `keyVaultCertSecretUri` (the value the orchestrator prints in its summary).
+4. **Run the main farm deploy.** Either trigger the workflow with `action: deploy`, or `az deployment group create` manually per [Manual deploy (escape hatch)](./manual-deploy.md).

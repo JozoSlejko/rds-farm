@@ -211,4 +211,4 @@ The three test PowerShell scripts in CI also run standalone — and there are th
 ./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg
 ```
 
-For a manual `workflow_dispatch → action: what-if` run, the gate is `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if`. The `prereqs` job only runs when `prereqs_action != use-existing` — see [CI/CD → trigger table](./ci-cd.md). Nothing in the live environment is changed.
+For a manual `workflow_dispatch → action: what-if` run, the gate is `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if` — see [CI/CD → trigger table](./ci-cd.md). Nothing in the live environment is changed.

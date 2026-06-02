@@ -66,7 +66,8 @@ After it finishes:
 - [ ] **Run the workflow manually** \u2014 `Actions \u2192 Deploy RDS Farm \u2192 Run workflow` with `action: what-if`. Review the resource diff in the run's job summary.
 - [ ] **Re-run with `action: deploy`** once you're happy with the plan. The `deploy` job runs (gated by the `production` environment) followed by `post-deploy-tests`.
 - [ ] **Inspect the workflow job summary** for `gatewayFqdn` and `rdWebUrl`. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1) automatically.
-- [ ] **Optional `prereqs_action` toggle.** `what-if` re-validates [`prereqs/main.bicep`](../prereqs/main.bicep); `deploy-new` re-applies it (useful if you've changed `prereqs/`). Default `use-existing` skips that job entirely.
+
+> Changes to [`prereqs/main.bicep`](../prereqs/main.bicep) (admin principals, SA network ACL, etc.) are **not** redeployed by this workflow. Re-run [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) from a laptop to apply them.
 
 Full reference: [CI/CD with GitHub Actions](./ci-cd.md).
 

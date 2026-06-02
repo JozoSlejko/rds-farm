@@ -13,21 +13,21 @@ A ready-to-use workflow is provided at [`.github/workflows/deploy.yml`](../.gith
 | --- | --- |
 | `workflow_dispatch` → `action: what-if` | `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if` |
 | `workflow_dispatch` → `action: deploy` | `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `deploy` → `post-deploy-tests` |
-| `workflow_dispatch` → `prereqs_action: what-if` / `deploy-new` | Adds a `prereqs` job up front. Default `use-existing` skips it. |
 
 Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI.
 
+> The pipeline does not provision the artifacts storage account or Key Vault — those are Tier 0 prerequisites set up by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1). When you need to change `prereqs/main.bicep` (add an admin principal, tighten the SA's network ACL, etc.), re-run that script from your laptop.
+
 The pipeline:
 
-1. **`lint`** — compiles `main.bicep`, `main.bicepparam`, `prereqs/main.bicep`, and `prereqs/main.bicepparam`.
+1. **`lint`** — compiles `main.bicep`, `main.bicepparam`, `prereqs/main.bicep`, and `prereqs/main.bicepparam` (the latter two are linted here even though the pipeline never deploys them, so Tier 0 doesn't ship broken Bicep).
 2. **`config-tests`** (no Azure) — runs [`actionlint`](https://github.com/rhysd/actionlint), [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2), [`tests/Test-DscConfiguration.ps1`](../tests/Test-DscConfiguration.ps1) (PSScriptAnalyzer + parse + Configuration discovery), and [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1) (no public-internet CIDRs, valid AD DNS IP, valid KV secret URI, hostnames ≤ 15 chars, etc.).
-3. **`prereqs`** *(only when `prereqs_action != use-existing`)* — runs `az deployment sub what-if`/`create` against [`prereqs/main.bicep`](../prereqs/main.bicep) — provisions a fresh Key Vault + DSC storage account. See [Prerequisite resources](./prereq-resources.md).
-4. **`package-dsc`** — zips `dsc/Configuration.ps1` → `Configuration.zip`.
-5. **`upload-artifacts`** — runs [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) which uploads the zip to your artifacts storage account using **`--auth-mode login`** (no account keys, no SAS — tenant policy forbids both). Uses the storage account from the prereqs job if it just ran, otherwise the `ARTIFACTS_STORAGE_ACCOUNT` repo variable. The script's outputs (`artifacts_location` URL and `artifacts_storage_account`) are piped to `$GITHUB_OUTPUT`. Subsequent jobs read both via `needs.upload-artifacts.outputs.*`.
-6. **`pre-deploy-checks`** (Azure read-only) — verifies the existing VNet/subnet exist and have enough free IPs for the requested `sessionHostCount`, that `AzureBastionSubnet` is present when `deployBastion=true`, that the Key Vault is RBAC-enabled and the cert is exportable + not about to expire (when `enableCertificateBinding=true`), that `Configuration.zip` exists in the artifacts container (checked with `az storage blob exists --auth-mode login`, no SAS), and finally runs `az deployment group validate` (this catches RBAC/policy errors that `what-if` masks as `ResourceNotFound`).
-7. **`what-if`** (when `action: what-if`) **or** **`deploy`** (when `action: deploy`). The what-if output is written to `whatif.txt` and appended to the run's job summary so the resource diff is one click away from the Actions tab.
-8. **`post-deploy-tests`** (after `deploy` succeeds) — runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1): every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, DNS resolution, RD Web URL HTTPS 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`, which is expected for production allow-lists and does not fail the job).
-9. Posts the gateway FQDN, RD Web URL, and test result to the GitHub Actions job summary.
+3. **`package-dsc`** — zips `dsc/Configuration.ps1` → `Configuration.zip`.
+4. **`upload-artifacts`** — runs [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) which uploads the zip to the storage account named by the `ARTIFACTS_STORAGE_ACCOUNT` repo variable (set by Tier 0) using **`--auth-mode login`** (no account keys, no SAS — tenant policy forbids both). Outputs `artifacts_location` + `artifacts_storage_account` for downstream jobs via `needs.upload-artifacts.outputs.*`.
+5. **`pre-deploy-checks`** (Azure read-only) — verifies the Tier 0 artifacts SA exists, the existing VNet/subnet exist and have enough free IPs for the requested `sessionHostCount`, that `AzureBastionSubnet` is present when `deployBastion=true`, that the Key Vault is RBAC-enabled and the cert is exportable + not about to expire (when `enableCertificateBinding=true`), that `Configuration.zip` exists in the artifacts container (checked with `az storage blob exists --auth-mode login`, no SAS), and finally runs `az deployment group validate` (this catches RBAC/policy errors that `what-if` masks as `ResourceNotFound`).
+6. **`what-if`** (when `action: what-if`) **or** **`deploy`** (when `action: deploy`). The what-if output is written to `whatif.txt` and appended to the run's job summary so the resource diff is one click away from the Actions tab.
+7. **`post-deploy-tests`** (after `deploy` succeeds) — runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1): every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, DNS resolution, RD Web URL HTTPS 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`, which is expected for production allow-lists and does not fail the job).
+8. Posts the gateway FQDN, RD Web URL, and test result to the GitHub Actions job summary.
 
 See [Testing & verification → §5](./testing.md#5-continuous-testing-in-ci) for the full test matrix.
 
@@ -37,13 +37,13 @@ The pipeline's service principal (created by Tier 0) holds these roles. The firs
 
 | Scope | Role | Why | Granted by Tier 0? |
 | --- | --- | --- | --- |
-| Subscription | `Contributor` + `Role Based Access Control Administrator` | Required for `prereqs_action: deploy-new` — the prereqs template is sub-scope and creates RGs + role assignments. Also implicitly satisfies all narrower scopes below. | **Yes** |
+| Subscription | `Contributor` + `Role Based Access Control Administrator` | `Contributor` is required to create the farm RG and read across the existing VNet RG; `RBAC Admin` is required because [`modules/sa-role.bicep`](../modules/sa-role.bicep) and [`modules/kv-role.bicep`](../modules/kv-role.bicep) create role assignments in the artifacts and Key Vault RGs at deploy time. Also implicitly satisfies all narrower scopes below. | **Yes** |
 | Target resource group (`rds-farm-rg`) | `Contributor` | Deploy VMs, LB, NSG, etc. | Inherited from sub |
 | Existing VNet RG | `Network Contributor` | Read existing VNet/subnet, attach NSG. | Inherited from sub |
 | Existing Key Vault (if cert binding) | `Key Vault Reader` + `Role Based Access Control Administrator` | [`modules/kv-role.bicep`](../modules/kv-role.bicep) creates a role assignment, which needs `Microsoft.Authorization/roleAssignments/write`. | Inherited from sub |
 | Artifacts storage account | `Storage Blob Data Contributor` | Upload `Configuration.zip` from CI (the `--auth-mode login` flag uses the SP's Entra token, no account keys, no SAS). The VMs themselves use a separate UAMI with `Storage Blob Data Reader` (granted by [`modules/sa-role.bicep`](../modules/sa-role.bicep)) to read the blob back at apply-time. | Inherited from sub |
 
-> If your tenant won't allow sub-scope `Contributor` for a CI principal, comment out **Step 3** in [`scripts/Initialize-CiPrerequisites.ps1`](../scripts/Initialize-CiPrerequisites.ps1), have a human run the prereqs deploy from their laptop ([Option 2 in `prereq-resources.md`](./prereq-resources.md#option-2--manual-az-deployment-sub-create)), and then grant the four narrower scopes above by hand. The workflow's `prereqs_action: deploy-new` choice will no longer work — leave it at `use-existing` forever.
+> If your tenant won't allow sub-scope `Contributor` for a CI principal, hand-grant the four narrower scopes above instead. The pipeline never deploys the prereqs template itself — that's always done from a laptop via [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) — so you don't need sub-scope `Contributor` purely for CI's sake.
 
 **Why a service principal and not your own user?** GitHub Actions can't log in interactively as a human (no browser, no MFA). OIDC federated credentials only attach to app registrations. Tier 0 runs *as you* (your Owner user signs in via `az login`) and creates a separate SP that the workflow uses thereafter. Two identities, two purposes.
 

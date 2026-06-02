@@ -4,9 +4,12 @@
 
 .DESCRIPTION
     One-time setup that creates everything the workflow needs to AUTHENTICATE
-    before it can do any work. After this script succeeds you can trigger the
-    "Deploy RDS Farm" workflow with prereqs_action: deploy-new to provision
-    the Azure data resources (Tier 1).
+    before it can do any work. After this script succeeds, the "Deploy RDS
+    Farm" workflow can be triggered (workflow_dispatch with action: what-if or
+    deploy) and it will deploy main.bicep into the existing Tier 0 artifacts
+    storage account + Key Vault. Provision those data resources from your
+    laptop via Initialize-RdsFarm.ps1 (which calls this script and then
+    deploys prereqs/main.bicep).
 
     What this script does (all idempotent):
       1. Creates (or reuses) an Entra application and service principal.
@@ -24,8 +27,9 @@
       6. Creates the 'preview' and 'production' GitHub environments.
 
     What this script does NOT do (intentional):
-      * Create the artifacts storage account / Key Vault / RGs — that is what
-        the `prereqs` job in .github/workflows/deploy.yml does.
+      * Create the artifacts storage account / Key Vault / RGs — that is
+        what `prereqs/main.bicep` does. Run it via Initialize-RdsFarm.ps1
+        or by hand per docs/prereq-resources.md.
       * Create or import the TLS certificate — see docs/fqdn-and-cert.md.
 
 .PARAMETER GitHubRepo
@@ -41,10 +45,8 @@
 .PARAMETER ArtifactsStorageAccount
     Optional. If you ALREADY have an artifacts storage account, pass its name
     and the script will set the ARTIFACTS_STORAGE_ACCOUNT repo variable.
-    Skip this if you plan to deploy the prereqs template from CI on the first
-    run — the workflow will then carry the new SA name forward automatically,
-    and you can set the variable afterwards so subsequent runs default to
-    `prereqs_action: use-existing`.
+    Skip this if you plan to provision the SA next via Initialize-RdsFarm.ps1
+    (which will set the variable for you).
 
 .PARAMETER Location
     Optional. Azure region the workflow will deploy the farm RG into. When set,
@@ -238,7 +240,9 @@ foreach ($c in $creds) {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==> Step 3: Subscription-scope RBAC" -ForegroundColor Green
-Write-Host "    (Required so 'prereqs_action: deploy-new' can run from CI.)"
+Write-Host "    (Contributor lets the workflow create the farm RG and deploy main.bicep;"
+Write-Host "     RBAC Admin lets modules/sa-role.bicep and modules/kv-role.bicep create"
+Write-Host "     the SA/KV role assignments at deploy time.)"
 
 $scope = "/subscriptions/$SubscriptionId"
 $roles = @(
@@ -314,8 +318,8 @@ if ($ArtifactsStorageAccount) {
     Set-GhVariable -Name 'ARTIFACTS_STORAGE_ACCOUNT' -Value $ArtifactsStorageAccount -Repo $GitHubRepo
 } else {
     Write-Host "  -ArtifactsStorageAccount not provided." -ForegroundColor Yellow
-    Write-Host "  Skip if you'll run 'prereqs_action: deploy-new' first; set this" -ForegroundColor Yellow
-    Write-Host "  afterwards with the SA name printed in the workflow job summary." -ForegroundColor Yellow
+    Write-Host "  Set this with the SA name produced by Initialize-RdsFarm.ps1 / prereqs/main.bicep" -ForegroundColor Yellow
+    Write-Host "  before you can trigger the deploy workflow." -ForegroundColor Yellow
 }
 
 if ($Location) {
@@ -367,19 +371,17 @@ if (-not $SkipSelfCheck) {
     Write-Host "Service principal OID    : $SpObjectId"
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  1. Edit prereqs/main.bicepparam (storageAccountName, keyVaultName, adminPrincipals)."
-    Write-Host "     Optional: hard-code your own user/group object IDs in adminPrincipals so you"
-    Write-Host "     get data-plane access on the new SA + KV out of the box. The CI service"
-    Write-Host "     principal is auto-injected at runtime, so you do not need to add it."
-    Write-Host "  2. In GitHub: Actions -> Deploy RDS Farm -> Run workflow with:"
-    Write-Host "        action         : what-if"
-    Write-Host "        prereqs_action : deploy-new"
-    Write-Host "  3. After it succeeds, copy the storage account name from the job summary:"
+    Write-Host "  1. Deploy prereqs/main.bicep from this laptop to create the artifacts SA + KV:"
+    Write-Host "        scripts/Initialize-RdsFarm.ps1   (recommended orchestrator)"
+    Write-Host "     or follow docs/prereq-resources.md Option 2 (manual az deployment sub create)."
+    Write-Host "  2. Set the ARTIFACTS_STORAGE_ACCOUNT repo variable to the new SA name:"
     Write-Host "        gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body <name>"
-    Write-Host "  4. Create the TLS certificate in the new Key Vault (docs/fqdn-and-cert.md)."
-    Write-Host "  5. Update main.bicepparam with keyVaultName / keyVaultResourceGroup /"
+    Write-Host "     (Initialize-RdsFarm.ps1 does this for you.)"
+    Write-Host "  3. Create the TLS certificate in the new Key Vault (docs/fqdn-and-cert.md)."
+    Write-Host "  4. Update main.bicepparam with keyVaultName / keyVaultResourceGroup /"
     Write-Host "     keyVaultCertSecretUri."
-    Write-Host "  6. Trigger the workflow with action: deploy."
+    Write-Host "  5. In GitHub: Actions -> Deploy RDS Farm -> Run workflow with action: what-if."
+    Write-Host "  6. Re-run with action: deploy once the what-if plan looks right."
 } else {
     Write-Host ""
     Write-Host "    CI bootstrap done (App ID $AppId, SP OID $SpObjectId)." -ForegroundColor DarkGray
