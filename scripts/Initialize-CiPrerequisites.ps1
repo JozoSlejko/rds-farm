@@ -305,27 +305,36 @@ foreach ($envName in @('preview','production')) {
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "==================== Bootstrap complete ====================" -ForegroundColor Green
-Write-Host "App ID (AZURE_CLIENT_ID) : $AppId"
-Write-Host "Tenant                   : $TenantId"
-Write-Host "Subscription             : $SubscriptionId"
-Write-Host "Service principal OID    : $SpObjectId"
-Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1. Edit prereqs/main.bicepparam (storageAccountName, keyVaultName, adminPrincipals)."
-Write-Host "     Optional: hard-code your own user/group object IDs in adminPrincipals so you"
-Write-Host "     get data-plane access on the new SA + KV out of the box. The CI service"
-Write-Host "     principal is auto-injected at runtime, so you do not need to add it."
-Write-Host "  2. In GitHub: Actions -> Deploy RDS Farm -> Run workflow with:"
-Write-Host "        action         : what-if"
-Write-Host "        prereqs_action : deploy-new"
-Write-Host "  3. After it succeeds, copy the storage account name from the job summary:"
-Write-Host "        gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body <name>"
-Write-Host "  4. Create the TLS certificate in the new Key Vault (docs/fqdn-and-cert.md)."
-Write-Host "  5. Update main.bicepparam with keyVaultName / keyVaultResourceGroup /"
-Write-Host "     keyVaultCertSecretUri."
-Write-Host "  6. Trigger the workflow with action: deploy."
+# The "Next steps" footer is for standalone runs and explains how to finish
+# the deploy by hand. When called from Initialize-RdsFarm.ps1 (-SkipSelfCheck)
+# those steps are bogus — the orchestrator does them all automatically in its
+# remaining steps — so suppress the whole footer in that case.
+if (-not $SkipSelfCheck) {
+    Write-Host ""
+    Write-Host "==================== Bootstrap complete ====================" -ForegroundColor Green
+    Write-Host "App ID (AZURE_CLIENT_ID) : $AppId"
+    Write-Host "Tenant                   : $TenantId"
+    Write-Host "Subscription             : $SubscriptionId"
+    Write-Host "Service principal OID    : $SpObjectId"
+    Write-Host ""
+    Write-Host "Next steps:" -ForegroundColor Cyan
+    Write-Host "  1. Edit prereqs/main.bicepparam (storageAccountName, keyVaultName, adminPrincipals)."
+    Write-Host "     Optional: hard-code your own user/group object IDs in adminPrincipals so you"
+    Write-Host "     get data-plane access on the new SA + KV out of the box. The CI service"
+    Write-Host "     principal is auto-injected at runtime, so you do not need to add it."
+    Write-Host "  2. In GitHub: Actions -> Deploy RDS Farm -> Run workflow with:"
+    Write-Host "        action         : what-if"
+    Write-Host "        prereqs_action : deploy-new"
+    Write-Host "  3. After it succeeds, copy the storage account name from the job summary:"
+    Write-Host "        gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body <name>"
+    Write-Host "  4. Create the TLS certificate in the new Key Vault (docs/fqdn-and-cert.md)."
+    Write-Host "  5. Update main.bicepparam with keyVaultName / keyVaultResourceGroup /"
+    Write-Host "     keyVaultCertSecretUri."
+    Write-Host "  6. Trigger the workflow with action: deploy."
+} else {
+    Write-Host ""
+    Write-Host "    CI bootstrap done (App ID $AppId, SP OID $SpObjectId)." -ForegroundColor DarkGray
+}
 
 # ---------------------------------------------------------------------------
 # 7. Self-check (read-only)

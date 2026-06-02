@@ -294,16 +294,26 @@ function Read-RequiredString {
 }
 
 function Read-RequiredStringArray {
+    <#
+        Prompt for one-or-more comma/space-separated tokens. Returns a string[].
+        Pass -Default to pre-fill (in -Interactive re-prompt mode): the
+        bracketed default is shown joined by commas; pressing Enter accepts it.
+    #>
     param(
         [string]$Prompt,
+        [string[]]$Default,
         [string[]]$Hint
     )
     if ($Hint) {
         Write-Host ''
         foreach ($line in $Hint) { Write-Host "    $line" -ForegroundColor DarkGray }
     }
+    $defShown = if ($Default -and $Default.Count) { ' [' + ($Default -join ',') + ']' } else { '' }
     while ($true) {
-        $raw = Read-Host -Prompt "  $Prompt (comma- or space-separated)"
+        $raw = Read-Host -Prompt "  $Prompt (comma- or space-separated)$defShown"
+        if ([string]::IsNullOrWhiteSpace($raw) -and $Default -and $Default.Count) {
+            return ,$Default
+        }
         $items = $raw -split '[,\s]+' | Where-Object { $_ }
         if ($items) { return ,$items }
         Write-Host "    At least one value required." -ForegroundColor Yellow
@@ -651,10 +661,10 @@ foreach ($p in @($initCi, $newCert, $prereqs)) {
 Write-Host ""
 Write-Host "==> Step 1: Collect inputs" -ForegroundColor Green
 if ($Interactive) {
-    Write-Host "    -Interactive mode: also prompting for every OPTIONAL parameter (defaults pre-filled)." -ForegroundColor Yellow
+    Write-Host "    -Interactive mode: prompting for every parameter (saved/CLI values pre-filled)." -ForegroundColor Yellow
 } else {
     Write-Host "    Anything you didn't pass on the command line is asked for here."
-    Write-Host "    (Tip: re-run with -Interactive to also be prompted for every optional value.)"
+    Write-Host "    (Tip: re-run with -Interactive to also be prompted for every saved/optional value.)"
 }
 Write-Host "    Press Enter to accept the bracketed default. Required fields keep asking until filled."
 Write-Host ""
@@ -763,15 +773,18 @@ if ($Interactive) {
 
 # GitHubRepo can come from CLI, config file, or this prompt. CLI values are
 # validated by [ValidatePattern] at bind time; config / prompt values are not,
-# so re-validate manually and re-prompt on a bad value.
+# so re-validate manually and re-prompt on a bad value. In -Interactive mode we
+# also re-prompt with the loaded value as the default so users can edit it
+# without retyping (and so the prompt sequence matches a fresh first-run).
 if ($GitHubRepo -and -not ($GitHubRepo -match '^[^/]+/[^/]+$')) {
     Write-Warning "Loaded GitHubRepo '$GitHubRepo' is not in <owner>/<repo> form - will re-prompt."
     $GitHubRepo = ''
 }
-if (-not $GitHubRepo) {
+if ($Interactive -or -not $GitHubRepo) {
     while ($true) {
         $GitHubRepo = Read-RequiredString `
             -Prompt 'GitHub repository (<owner>/<repo>)' `
+            -Default $GitHubRepo `
             -Hint @(
                 'Used to store GitHub repo secrets/variables and to federate Azure access for CI.',
                 "Example: 'contoso/rds-farm'."
@@ -782,43 +795,49 @@ if (-not $GitHubRepo) {
     }
 }
 
-if (-not $AdDomainName) {
+if ($Interactive -or -not $AdDomainName) {
     $AdDomainName = Read-RequiredString `
         -Prompt 'AD domain name (e.g. contoso.local)' `
+        -Default $AdDomainName `
         -Hint @(
             'Existing Active Directory forest/domain the new VMs will join.',
             'Use the FQDN your DCs report (e.g. contoso.local, ad.contoso.com).'
         )
 }
-if (-not $AdDnsServerIp) {
+if ($Interactive -or -not $AdDnsServerIp) {
     $AdDnsServerIp = Read-RequiredString `
         -Prompt 'AD DNS server IP (e.g. 10.10.0.4)' `
+        -Default $AdDnsServerIp `
         -Hint @(
             'IP of a Domain Controller the new VMs can reach for DNS resolution.',
             'Set as the subnet DNS so domain-join works during VM bootstrap.'
         )
 }
-if (-not $ExistingVnetName) {
+if ($Interactive -or -not $ExistingVnetName) {
     $ExistingVnetName = Read-RequiredString `
         -Prompt 'Existing VNet name' `
+        -Default $ExistingVnetName `
         -Hint 'Name of the pre-existing VNet that hosts the RDS subnet (this script never creates it).'
 }
-if (-not $ExistingVnetResourceGroup) {
+if ($Interactive -or -not $ExistingVnetResourceGroup) {
     $ExistingVnetResourceGroup = Read-RequiredString `
         -Prompt 'Resource group of the VNet' `
+        -Default $ExistingVnetResourceGroup `
         -Hint 'Resource group where the existing VNet lives (often different from the farm RG).'
 }
-if (-not $ExistingRdsSubnetName) {
+if ($Interactive -or -not $ExistingRdsSubnetName) {
     $ExistingRdsSubnetName = Read-RequiredString `
         -Prompt 'Subnet name for RDS VMs' `
+        -Default $ExistingRdsSubnetName `
         -Hint @(
             'Subnet inside the VNet above where the gateway + session-host VMs will land.',
             'Must have line-of-sight to the DC and outbound internet for the DSC extension.'
         )
 }
-if (-not $AllowedClientSourceAddressPrefixes) {
+if ($Interactive -or -not $AllowedClientSourceAddressPrefixes) {
     $AllowedClientSourceAddressPrefixes = Read-RequiredStringArray `
         -Prompt 'Allowed client source CIDRs (NEVER 0.0.0.0/0)' `
+        -Default $AllowedClientSourceAddressPrefixes `
         -Hint @(
             'CIDRs allowed to reach the public LB on TCP 443 (RD Web / Gateway) and UDP 3391 (RDP UDP).',
             'Use your office / VPN egress ranges. Open internet (0.0.0.0/0) is rejected.'
@@ -829,10 +848,11 @@ if (-not $AllowedClientSourceAddressPrefixes) {
 # SelfSigned lets you skip -PublicGatewayFqdn entirely and use the Azure-
 # managed LB hostname; Csr / ImportPfx require a vanity FQDN you own (public
 # CAs cannot sign for cloudapp.azure.com).
-if (-not $CertMode) {
+if ($Interactive -or -not $CertMode) {
+    $modeDefault = if ($CertMode) { $CertMode } else { 'SelfSigned' }
     $modeRaw = Read-RequiredString `
         -Prompt 'Cert mode (Csr / ImportPfx / SelfSigned)' `
-        -Default 'SelfSigned' `
+        -Default $modeDefault `
         -Hint @(
             'Csr        = production. Script emits a CSR; you submit to your CA; re-run to merge the signed cert.',
             'ImportPfx  = production. You supply an existing .pfx already issued by a publicly-trusted CA.',
@@ -841,18 +861,26 @@ if (-not $CertMode) {
     if ($modeRaw -notin @('Csr','ImportPfx','SelfSigned')) { throw "Invalid -CertMode '$modeRaw'." }
     $CertMode = $modeRaw
 }
-if ($CertMode -eq 'ImportPfx' -and -not $PfxPath) {
+if ($CertMode -eq 'ImportPfx' -and ($Interactive -or -not $PfxPath)) {
     $PfxPath = Read-RequiredString `
         -Prompt 'Path to .pfx file' `
+        -Default $PfxPath `
         -Hint 'Full path to the existing .pfx. The cert password is prompted separately as a SecureString.'
 }
 
-if ($CertMode -eq 'SelfSigned' -and -not $PublicGatewayFqdn) {
+if ($CertMode -eq 'SelfSigned' -and ($Interactive -or -not $PublicGatewayFqdn)) {
     # Lab path: derive the FQDN from the Azure-managed LB hostname. The DNS
     # label has to come first because there's no vanity FQDN to default it
-    # from. Pre-fill from the GitHub repo name as a hint.
-    if (-not $GatewayDnsLabelPrefix) {
-        $labelHint = Get-DefaultDnsLabel ($GitHubRepo -split '/')[-1]
+    # from. Pre-fill from the GitHub repo name as a hint, or from a previously
+    # derived label/FQDN if we have one in the config.
+    if ($Interactive -or -not $GatewayDnsLabelPrefix) {
+        $labelHint = if ($GatewayDnsLabelPrefix) {
+            $GatewayDnsLabelPrefix
+        } elseif ($PublicGatewayFqdn) {
+            Get-DefaultDnsLabel $PublicGatewayFqdn
+        } else {
+            Get-DefaultDnsLabel ($GitHubRepo -split '/')[-1]
+        }
         $GatewayDnsLabelPrefix = Read-RequiredString `
             -Prompt 'Gateway DNS label (Azure PIP, globally unique)' `
             -Default $labelHint `
@@ -867,9 +895,10 @@ if ($CertMode -eq 'SelfSigned' -and -not $PublicGatewayFqdn) {
 } else {
     # Vanity FQDN path (Csr / ImportPfx, or SelfSigned with a vanity FQDN
     # explicitly passed in).
-    if (-not $PublicGatewayFqdn) {
+    if ($Interactive -or -not $PublicGatewayFqdn) {
         $PublicGatewayFqdn = Read-RequiredString `
             -Prompt 'Public gateway FQDN (e.g. rds.contoso.com)' `
+            -Default $PublicGatewayFqdn `
             -Hint @(
                 'Vanity hostname your users will type into the RD client / browser.',
                 'Must be a DNS name you own. Will become the cert Subject/SAN and the CNAME target after deploy.'
@@ -878,10 +907,10 @@ if ($CertMode -eq 'SelfSigned' -and -not $PublicGatewayFqdn) {
     if (-not (Test-FqdnFormat $PublicGatewayFqdn)) {
         throw "PublicGatewayFqdn '$PublicGatewayFqdn' is not a valid DNS name. Expect 'rds.contoso.com', not bare hostnames, underscores, or labels longer than 63 chars."
     }
-    if (-not $GatewayDnsLabelPrefix) {
+    if ($Interactive -or -not $GatewayDnsLabelPrefix) {
         $GatewayDnsLabelPrefix = Read-RequiredString `
             -Prompt 'Gateway DNS label (Azure PIP, globally unique)' `
-            -Default (Get-DefaultDnsLabel $PublicGatewayFqdn) `
+            -Default ($(if ($GatewayDnsLabelPrefix) { $GatewayDnsLabelPrefix } else { Get-DefaultDnsLabel $PublicGatewayFqdn })) `
             -Hint @(
                 "Label for the Azure-managed public IP. Your vanity FQDN will CNAME to:",
                 "  <label>.$Location.cloudapp.azure.com",
@@ -890,17 +919,19 @@ if ($CertMode -eq 'SelfSigned' -and -not $PublicGatewayFqdn) {
     }
 }
 
-if (-not $ArtifactsStorageAccount) {
+if ($Interactive -or -not $ArtifactsStorageAccount) {
     $ArtifactsStorageAccount = Read-RequiredString `
         -Prompt 'Artifacts storage account name (3-24 chars, lowercase, globally unique)' `
+        -Default $ArtifactsStorageAccount `
         -Hint @(
             'Storage account that hosts Configuration.zip (the DSC artifact) for the VM extension.',
             'Created by the prereqs Bicep if it does not already exist. Reused on re-runs.'
         )
 }
-if (-not $KeyVaultName) {
+if ($Interactive -or -not $KeyVaultName) {
     $KeyVaultName = Read-RequiredString `
         -Prompt 'Key Vault name (3-24 chars, globally unique)' `
+        -Default $KeyVaultName `
         -Hint @(
             'Key Vault that stores the TLS cert. VMs read it at boot via their managed identity.',
             'Created by the prereqs Bicep if it does not already exist. Reused on re-runs.'

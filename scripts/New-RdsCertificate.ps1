@@ -142,22 +142,56 @@ function Get-VersionlessSecretUri {
 }
 
 function New-KvCertPolicy {
+    <#
+        Build a Key Vault certificate policy in the camelCase shape the REST
+        API (and modern Azure CLI) uses. Earlier versions of this function
+        read 'az keyvault certificate get-default-policy' and patched the
+        snake_case fields (key_props / x509_props / issuer_parameters), but
+        the CLI switched the output to camelCase (keyProperties /
+        x509CertificateProperties / issuerParameters), so the patch silently
+        no-op'd and Set-StrictMode threw "key_props cannot be found".
+        Building from scratch sidesteps the shape drift and gives us exactly
+        the fields we need (SAN + Server Auth EKU + exportable key).
+    #>
     param(
         [string]$Fqdn,
         [string]$IssuerName,            # 'Unknown' for CSR mode, 'Self' for self-signed
         [int]   $ValidityMonths
     )
-    $policy = az keyvault certificate get-default-policy | ConvertFrom-Json
-    $policy.key_props.exportable          = $true
-    $policy.key_props.key_type            = 'RSA'
-    $policy.key_props.key_size            = 2048
-    $policy.key_props.reuse_key           = $false
-    $policy.x509_props.subject            = Get-CertSubject $Fqdn
-    $policy.x509_props.sans               = @{ dns_names = @($Fqdn); emails = @(); upns = @() }
-    $policy.x509_props.ekus               = @('1.3.6.1.5.5.7.3.1')   # Server Authentication
-    $policy.x509_props.validity_in_months = $ValidityMonths
-    $policy.issuer_parameters.name        = $IssuerName
-    return $policy
+    return @{
+        keyProperties = @{
+            exportable = $true
+            keyType    = 'RSA'
+            keySize    = 2048
+            reuseKey   = $false
+        }
+        secretProperties = @{
+            contentType = 'application/x-pkcs12'
+        }
+        x509CertificateProperties = @{
+            subject = Get-CertSubject $Fqdn
+            subjectAlternativeNames = @{
+                dnsNames = @($Fqdn)
+                emails   = @()
+                upns     = @()
+            }
+            ekus = @('1.3.6.1.5.5.7.3.1')           # Server Authentication
+            keyUsage = @(
+                'digitalSignature',
+                'keyEncipherment'
+            )
+            validityInMonths = $ValidityMonths
+        }
+        issuerParameters = @{
+            name = $IssuerName
+        }
+        lifetimeActions = @(
+            @{
+                trigger = @{ daysBeforeExpiry = 90 }
+                action  = @{ actionType       = 'AutoRenew' }
+            }
+        )
+    }
 }
 
 function Save-PolicyToTempFile {
