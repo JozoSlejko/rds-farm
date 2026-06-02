@@ -153,18 +153,45 @@ $vault    = 'contoso-rds-kv01'
 $certName = 'rds-tls'
 $fqdn     = 'rds.contoso.com'   # your vanity gateway FQDN (matches publicGatewayFqdn)
 
-# 1) Build an exportable policy with the right subject / SAN / EKU
-$policy = az keyvault certificate get-default-policy | ConvertFrom-Json
-$policy.key_props.exportable          = $true
-$policy.key_props.key_type            = 'RSA'
-$policy.key_props.key_size            = 2048
-$policy.key_props.reuse_key           = $false
-$policy.x509_props.subject            = "CN=$fqdn"
-$policy.x509_props.sans               = @{ dns_names = @($fqdn); emails = @(); upns = @() }
-$policy.x509_props.ekus               = @('1.3.6.1.5.5.7.3.1')   # Server Authentication
-$policy.x509_props.validity_in_months = 12
-$policy.issuer_parameters.name        = 'Unknown'                # 'Unknown' = manual CSR; replace with 'DigiCert' / 'GlobalSign' if you have a KV-integrated CA account
-
+# 1) Build an exportable policy with the right subject / SAN / EKU.
+#    NOTE: the Key Vault REST API + modern Azure CLI use camelCase
+#    (keyProperties / x509CertificateProperties / issuerParameters). Older
+#    docs that read `az keyvault certificate get-default-policy` and patched
+#    snake_case fields (key_props / x509_props / issuer_parameters) silently
+#    no-op on current CLI — build the policy directly instead.
+$policy = @{
+    keyProperties = @{
+        exportable = $true
+        keyType    = 'RSA'
+        keySize    = 2048
+        reuseKey   = $false
+    }
+    secretProperties = @{
+        contentType = 'application/x-pkcs12'
+    }
+    x509CertificateProperties = @{
+        subject = "CN=$fqdn"
+        subjectAlternativeNames = @{
+            dnsNames = @($fqdn)
+            emails   = @()
+            upns     = @()
+        }
+        ekus             = @('1.3.6.1.5.5.7.3.1')   # Server Authentication
+        keyUsage         = @('digitalSignature','keyEncipherment')
+        validityInMonths = 12
+    }
+    issuerParameters = @{
+        # 'Unknown' = manual CSR; replace with 'DigiCert' / 'GlobalSign' if
+        # you have a KV-integrated CA account.
+        name = 'Unknown'
+    }
+    lifetimeActions = @(
+        @{
+            trigger = @{ daysBeforeExpiry = 90 }
+            action  = @{ actionType       = 'AutoRenew' }
+        }
+    )
+}
 $policy | ConvertTo-Json -Depth 10 | Out-File policy.json -Encoding utf8
 
 # 2) Start the cert operation (creates a pending cert + CSR)
@@ -203,9 +230,10 @@ az keyvault certificate import `
 
 $pfxPwdPlain = $null   # remove plaintext from memory ASAP
 
-# Confirm it's exportable
-az keyvault certificate show-policy --vault-name $vault --name $certName `
-  --query "key_props.exportable" -o tsv
+# Confirm it's exportable (note: 'show-policy' is not a real CLI subcommand;
+# use 'show ... --query policy.<...>' instead)
+az keyvault certificate show --vault-name $vault --name $certName `
+  --query 'policy.keyProperties.exportable' -o tsv
 # Must print: true
 ```
 
@@ -221,12 +249,36 @@ $vault    = 'contoso-rds-kv01'
 $certName = 'rds-tls-selfsigned'
 $fqdn     = 'contoso-rds.westeurope.cloudapp.azure.com'   # match exactly what RD clients connect to
 
-$policy = az keyvault certificate get-default-policy | ConvertFrom-Json
-$policy.key_props.exportable           = $true
-$policy.x509_props.subject             = "CN=$fqdn"
-$policy.x509_props.sans                = @{ dns_names = @($fqdn); emails = @(); upns = @() }
-$policy.issuer_parameters.name         = 'Self'
-$policy.x509_props.validity_in_months  = 12
+# Build the policy directly in camelCase — see the note in 3b for why.
+$policy = @{
+    keyProperties = @{
+        exportable = $true
+        keyType    = 'RSA'
+        keySize    = 2048
+        reuseKey   = $false
+    }
+    secretProperties = @{
+        contentType = 'application/x-pkcs12'
+    }
+    x509CertificateProperties = @{
+        subject = "CN=$fqdn"
+        subjectAlternativeNames = @{
+            dnsNames = @($fqdn)
+            emails   = @()
+            upns     = @()
+        }
+        ekus             = @('1.3.6.1.5.5.7.3.1')   # Server Authentication
+        keyUsage         = @('digitalSignature','keyEncipherment')
+        validityInMonths = 12
+    }
+    issuerParameters = @{ name = 'Self' }
+    lifetimeActions = @(
+        @{
+            trigger = @{ daysBeforeExpiry = 90 }
+            action  = @{ actionType       = 'AutoRenew' }
+        }
+    )
+}
 $policy | ConvertTo-Json -Depth 10 | Out-File policy.json -Encoding utf8
 
 az keyvault certificate create --vault-name $vault --name $certName --policy `@policy.json

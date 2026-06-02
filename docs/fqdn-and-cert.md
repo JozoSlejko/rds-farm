@@ -71,11 +71,11 @@ The deployment binds **one** certificate to all four RDS roles (`RDGateway`, `RD
 
 | Requirement | Why | What Tier 0 enforces |
 | --- | --- | --- |
-| **Subject CN or SAN** matches `publicGatewayFqdn` | RDP client validates the hostname against the cert. Any mismatch → connection rejected. | `New-RdsCertificate.ps1` builds the KV cert policy with `subject = "CN=$Fqdn"` and `sans.dns_names = @($Fqdn)`. |
+| **Subject CN or SAN** matches `publicGatewayFqdn` | RDP client validates the hostname against the cert. Any mismatch → connection rejected. | `New-RdsCertificate.ps1` builds the KV cert policy with `subject = "CN=$Fqdn"` and `subjectAlternativeNames.dnsNames = @($Fqdn)`. |
 | **Issued by a publicly trusted CA** *(production)* | The cert is presented to remote users on machines that don't trust your private CA. | `-CertMode Csr`: Tier 0 generates a CSR you submit to your CA. `-CertMode ImportPfx`: you supply a PFX already issued by a trusted CA. **`-CertMode SelfSigned` is rejected for any non-`*.cloudapp.azure.com` hostname in CI** (see Tier 2 readiness checks). |
-| **Key type RSA 2048+** (or ECC P-256) | Required by Schannel / RD Gateway. RSA 4096 is fine, RSA 1024 is not. | KV policy: `key_type = 'RSA'`, `key_size = 2048`. |
+| **Key type RSA 2048+** (or ECC P-256) | Required by Schannel / RD Gateway. RSA 4096 is fine, RSA 1024 is not. | KV policy: `keyType = 'RSA'`, `keySize = 2048`. |
 | **Enhanced Key Usage = Server Authentication** (OID `1.3.6.1.5.5.7.3.1`) | RDS rejects certs without it (error `0x80092004` in EventLog). | KV policy: `ekus = ('1.3.6.1.5.5.7.3.1')`. |
-| **`exportable: true`** in the KV cert policy | The broker DSC step exports a temporary PFX to call `Set-RDCertificate -ImportPath`. A non-exportable cert pulled by the KV VM extension cannot be re-exported, even by `LocalSystem`. **This is the most common gotcha.** | KV policy: `exportable = true`. |
+| **`exportable: true`** in the KV cert policy | The broker DSC step exports a temporary PFX to call `Set-RDCertificate -ImportPath`. A non-exportable cert pulled by the KV VM extension cannot be re-exported, even by `LocalSystem`. **This is the most common gotcha.** | KV policy: `keyProperties.exportable = true`. |
 | **Includes the private key** | `Set-RDCertificate` needs the private key to install on the other RDS servers. | KV-generated certs always include it; `ImportPfx` mode requires a `.pfx` with private key (not a `.cer`). |
 | **Valid for at least 90 days** | RDS doesn't auto-rotate; you want headroom before re-deploying. | KV default is 12 months; CI's `pre-deploy-checks` job fails the run if the cert expires within 30 days. |
 

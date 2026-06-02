@@ -342,8 +342,12 @@ jobs:
           echo "[OK] Key Vault $KV is RBAC-enabled"
 
           CERT_NAME=$(echo "$SECRET_URI" | awk -F/ '{print $5}')
-          POLICY=$(az keyvault certificate show-policy --vault-name "$KV" --name "$CERT_NAME" -o json 2>/dev/null || true)
-          if [ -z "$POLICY" ]; then
+          # NOTE: there is no 'az keyvault certificate show-policy' subcommand
+          # (despite what the help pages used to suggest); fetch the cert and
+          # project the policy with --query. 'az keyvault certificate show'
+          # returns the cert object incl. .policy.keyProperties.exportable.
+          POLICY=$(az keyvault certificate show --vault-name "$KV" --name "$CERT_NAME" --query policy -o json 2>/dev/null || true)
+          if [ -z "$POLICY" ] || [ "$POLICY" = "null" ]; then
             echo "::error::Certificate '$CERT_NAME' not found in $KV (from $SECRET_URI)"; exit 1
           fi
           EXPORTABLE=$(echo "$POLICY" | jq -r '.keyProperties.exportable')

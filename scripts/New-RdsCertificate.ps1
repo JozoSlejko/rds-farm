@@ -298,8 +298,9 @@ if ($PSCmdlet.ParameterSetName -eq 'Merge') {
                 [GC]::Collect()
             }
 
-            # Force-verify exportable
-            $exp = az keyvault certificate show-policy --vault-name $VaultName --name $CertName --query "key_props.exportable" -o tsv
+            # Force-verify exportable. NOTE: 'az keyvault certificate show-policy'
+            # is not a real CLI subcommand; use 'show ... --query policy.<...>'.
+            $exp = az keyvault certificate show --vault-name $VaultName --name $CertName --query 'policy.keyProperties.exportable' -o tsv
             if ($exp -ne 'true') {
                 throw "Imported cert has exportable=$exp. Re-issue with exportable key material — RDS DSC will fail otherwise."
             }

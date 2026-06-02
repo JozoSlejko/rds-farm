@@ -13,7 +13,7 @@
       2. If enableCertificateBinding = true:
            - Key Vault exists and is in RBAC mode.
            - The certificate referenced by keyVaultCertSecretUri exists.
-           - Cert policy has key_props.exportable = true.
+           - Cert policy has keyProperties.exportable = true.
            - Cert expires more than 30 days from now (soft warn otherwise).
       3. If $env:ARTIFACTS_LOCATION + $env:ARTIFACTS_SAS are set, HEAD
          Configuration.zip via the SAS and require 200 OK. Skipped when
@@ -205,14 +205,17 @@ if (-not $certEnabled) {
 
         # https://<vault>.vault.azure.net/secrets/<name>[/<version>]
         $certNameFromUri = ($kvSecretUri -split '/')[4]
-        $polJson = az keyvault certificate show-policy --vault-name $kvName --name $certNameFromUri -o json 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $polJson) {
+        # NOTE: 'az keyvault certificate show-policy' is not a real CLI subcommand.
+        # Use 'show ... --query policy' to get the policy object. The CLI returns
+        # camelCase (keyProperties), so the JSON we parse uses .keyProperties too.
+        $polJson = az keyvault certificate show --vault-name $kvName --name $certNameFromUri --query policy -o json 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $polJson -or $polJson -eq 'null') {
             Write-TestResult "Certificate '$certNameFromUri' exists in $kvName" $false `
                 "URI was: $kvSecretUri"
         } else {
             Write-TestResult "Certificate '$certNameFromUri' exists in $kvName" $true
             $pol = $polJson | ConvertFrom-Json
-            Write-TestResult "Cert '$certNameFromUri' policy is exportable" ([bool]$pol.key_props.exportable)
+            Write-TestResult "Cert '$certNameFromUri' policy is exportable" ([bool]$pol.keyProperties.exportable)
 
             $attrs = az keyvault certificate show --vault-name $kvName --name $certNameFromUri --query attributes -o json 2>$null | ConvertFrom-Json
             if ($attrs.expires) {
