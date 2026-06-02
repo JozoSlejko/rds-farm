@@ -533,7 +533,7 @@ if ($Interactive) {
     $DomainJoinUserName = Read-OptionalString `
         -Prompt 'Domain-join service account (sAMAccountName)' `
         -Default $DomainJoinUserName `
-        -Hint 'Pre-created AD account used by the JoinDomain DSC resource (password supplied via $env:DOMAIN_JOIN_PASSWORD).'
+        -Hint 'Pre-created AD account used by the JoinDomain DSC resource. The password is collected in Step 2 (CI bootstrap) and stored as the DOMAIN_JOIN_PASSWORD GitHub secret.'
 
     $DomainJoinOuPath = Read-OptionalString `
         -Prompt 'Domain-join target OU (DN, empty = default Computers container)' `
@@ -547,7 +547,7 @@ if ($Interactive) {
     $LocalAdminUserName = Read-OptionalString `
         -Prompt 'Local admin username (on every RDS VM)' `
         -Default $LocalAdminUserName `
-        -Hint 'Local administrator account baked into every VM (password supplied via $env:LOCAL_ADMIN_PASSWORD).'
+        -Hint 'Local administrator account baked into every VM. The password is collected in Step 2 (CI bootstrap) and stored as the LOCAL_ADMIN_PASSWORD GitHub secret.'
 
     $RdsAccessGroup = Read-OptionalString `
         -Prompt 'AD group allowed to use RD Web + RD Gateway' `
