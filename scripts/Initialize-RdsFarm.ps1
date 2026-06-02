@@ -30,6 +30,13 @@
     Idempotent: re-running keeps existing resources and just rewrites the
     bicepparam values.
 
+    Step 1 answers persist: at the end of Step 1 every collected value is
+    written to a .psd1 config file (default: <repo>/.rds-farm-init.config.psd1).
+    The next run loads it as defaults so you can press Enter through every
+    -Interactive prompt. CLI parameters always override the file. Secrets
+    (DOMAIN_JOIN_PASSWORD, LOCAL_ADMIN_PASSWORD, cert passwords) are never
+    written there.
+
     Out of scope (you still do these by hand because they live outside Azure
     or outside this repo):
       * Creating the AD domain-join service account and the RDS access group.
@@ -39,7 +46,8 @@
       * Activating RDS CALs on the broker (Tier 2 — manual MMC step).
 
 .PARAMETER GitHubRepo
-    <org-or-user>/<repo>, e.g. 'contoso/rds-farm'. Required.
+    <org-or-user>/<repo>, e.g. 'contoso/rds-farm'. If omitted, taken from the
+    config file (see -ConfigFile) or prompted for interactively.
 
 .PARAMETER SubscriptionId
     Optional. Defaults to the subscription `az account show` returns.
@@ -152,6 +160,16 @@
     Without this switch the script only asks for the required values and
     silently uses defaults for everything else.
 
+.PARAMETER ConfigFile
+    Path to the .psd1 file used to persist Step 1 answers between runs.
+    Default: <repo>/.rds-farm-init.config.psd1. Loaded at startup as defaults
+    (CLI params still win) and rewritten at the end of Step 1 with the values
+    you just confirmed. Hand-editable PowerShell data file.
+
+.PARAMETER NoSaveConfig
+    Switch. Do not (re)write the config file at the end of Step 1. Use when
+    you want a one-off run that does not pollute your saved defaults.
+
 .EXAMPLE
     # Fully scripted (CI/CD-friendly, prompts only for passwords)
     .\scripts\Initialize-RdsFarm.ps1 `
@@ -188,7 +206,6 @@
 [CmdletBinding()]
 param(
     # GitHub
-    [Parameter(Mandatory)]
     [ValidatePattern('^[^/]+/[^/]+$')]
     [string]$GitHubRepo,
 
@@ -236,7 +253,11 @@ param(
     [switch]$SkipPrereqsDeploy,
 
     # UX
-    [switch]$Interactive
+    [switch]$Interactive,
+
+    # Persisted Step 1 answers
+    [string]$ConfigFile = (Join-Path $PSScriptRoot '..' '.rds-farm-init.config.psd1'),
+    [switch]$NoSaveConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -448,11 +469,150 @@ function Get-MyObjectId {
 }
 
 # ---------------------------------------------------------------------------
+# Persisted Step 1 answers (.psd1 config file)
+# ---------------------------------------------------------------------------
+# Ordered list of (sectionTitle, paramNames) used by BOTH the loader (to know
+# which variables to overlay) and the writer (to control section grouping and
+# write order). Anything NOT in this list is never persisted - in particular
+# UX/meta params like -Interactive, -ConfigFile, -NoSaveConfig.
+$script:RdsFarmInitConfigSections = @(
+    @{ Title = 'GitHub & Azure scope'; Params = @('GitHubRepo','SubscriptionId','Location') }
+    @{ Title = 'Active Directory'    ; Params = @('AdDomainName','AdDnsServerIp','DomainJoinUserName','DomainJoinOuPath','LocalAdminUserName','RdsAccessGroup') }
+    @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes') }
+    @{ Title = 'Gateway hostname'    ; Params = @('PublicGatewayFqdn','GatewayDnsLabelPrefix') }
+    @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup') }
+    @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName') }
+    @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
+    @{ Title = 'File + skip toggles' ; Params = @('BicepParamFile','SkipCiBootstrap','SkipPrereqsDeploy') }
+)
+
+function Get-AllowedConfigParams {
+    return $script:RdsFarmInitConfigSections | ForEach-Object { $_.Params } | ForEach-Object { $_ }
+}
+
+function Format-RdsFarmInitPsd1Value {
+    <#
+        Serialize a single value into a literal a .psd1 file can hold.
+        Strings: single-quoted with internal ' doubled.
+        Bools/switches: $true / $false.
+        IEnumerable: @('a','b') (empty arrays as @()).
+        Null / anything else: empty string literal.
+    #>
+    param($Value)
+    if ($null -eq $Value) { return "''" }
+    if ($Value -is [bool] -or $Value -is [System.Management.Automation.SwitchParameter]) {
+        return $(if ([bool]$Value) { '$true' } else { '$false' })
+    }
+    if ($Value -is [string]) {
+        $escaped = $Value -replace "'", "''"
+        return "'$escaped'"
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $items = @($Value | ForEach-Object {
+            $s = ([string]$_) -replace "'", "''"
+            "'$s'"
+        })
+        if ($items.Count -eq 0) { return '@()' }
+        return "@($($items -join ', '))"
+    }
+    $escaped = ([string]$Value) -replace "'", "''"
+    return "'$escaped'"
+}
+
+function Import-RdsFarmInitConfig {
+    <#
+        Load saved Step 1 answers from $Path and overlay them onto the
+        currently-bound parameter variables in the caller's scope. CLI
+        parameters (anything present in $PSBoundParameters) are NEVER
+        overwritten. Returns the number of values applied. No-op if the file
+        does not exist. Warns and continues on parse errors.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][hashtable]$BoundParameters
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 0 }
+    try {
+        $loaded = Import-PowerShellDataFile -LiteralPath $Path
+    } catch {
+        Write-Warning "Could not parse config file '$Path' - ignoring. ($($_.Exception.Message))"
+        return 0
+    }
+    $applied = 0
+    foreach ($name in Get-AllowedConfigParams) {
+        if ($BoundParameters.ContainsKey($name)) { continue }   # CLI wins
+        if (-not $loaded.ContainsKey($name))     { continue }
+        try {
+            Set-Variable -Name $name -Scope 1 -Value $loaded[$name]
+            $applied++
+        } catch {
+            Write-Warning "Could not apply saved value for '$name': $($_.Exception.Message)"
+        }
+    }
+    return $applied
+}
+
+function Save-RdsFarmInitConfig {
+    <#
+        Write current Step 1 answers to $Path as a tidy, hand-editable .psd1.
+        Reads each value from the caller's scope via Get-Variable -Scope 1.
+        Creates the parent directory if needed. Atomic-ish: writes to .tmp
+        then renames so a half-written file never replaces a good one.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path
+    )
+    $sb = [System.Text.StringBuilder]::new()
+    $null = $sb.AppendLine('@{')
+    $null = $sb.AppendLine("    # Generated by Initialize-RdsFarm.ps1 on $((Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')).")
+    $null = $sb.AppendLine('    # Hand-edit values to change defaults on the next interactive run.')
+    $null = $sb.AppendLine('    # CLI parameters ALWAYS override values stored here.')
+    $null = $sb.AppendLine('    # Secrets (DOMAIN_JOIN_PASSWORD, LOCAL_ADMIN_PASSWORD, cert passwords) are')
+    $null = $sb.AppendLine('    # never persisted in this file.')
+    $null = $sb.AppendLine('')
+
+    foreach ($section in $script:RdsFarmInitConfigSections) {
+        $dashes = '-' * [Math]::Max(1, 60 - $section.Title.Length)
+        $null = $sb.AppendLine("    # --- $($section.Title) $dashes")
+        $maxLen = ($section.Params | Measure-Object -Property Length -Maximum).Maximum
+        foreach ($name in $section.Params) {
+            $val = Get-Variable -Name $name -Scope 1 -ValueOnly -ErrorAction SilentlyContinue
+            $formatted = Format-RdsFarmInitPsd1Value $val
+            $padded = $name.PadRight($maxLen)
+            $null = $sb.AppendLine("    $padded = $formatted")
+        }
+        $null = $sb.AppendLine('')
+    }
+    $null = $sb.AppendLine('}')
+
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $tmp = "$Path.tmp"
+    Set-Content -LiteralPath $tmp -Value $sb.ToString() -Encoding utf8
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+# ---------------------------------------------------------------------------
 # 0. Pre-flight
 # ---------------------------------------------------------------------------
 Write-Host "==> Pre-flight" -ForegroundColor Cyan
 Assert-Tool 'az'
 Assert-Tool 'gh'
+
+# Load persisted Step 1 answers from $ConfigFile BEFORE we use $SubscriptionId
+# / $BicepParamFile / etc. CLI params (anything bound by the caller) always win.
+if (-not [System.IO.Path]::IsPathRooted($ConfigFile)) {
+    $ConfigFile = Join-Path (Get-Location).Path $ConfigFile
+}
+$ConfigFile = [System.IO.Path]::GetFullPath($ConfigFile)
+if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+    $applied = Import-RdsFarmInitConfig -Path $ConfigFile -BoundParameters $PSBoundParameters
+    Write-Host "    Config file  : $ConfigFile (loaded $applied saved value$(if ($applied -ne 1) { 's' }))"
+} else {
+    Write-Host "    Config file  : $ConfigFile (will be created at end of Step 1)"
+}
 
 az bicep version 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw "az bicep is not available. Run 'az bicep install' first." }
@@ -599,6 +759,27 @@ if ($Interactive) {
 
     Write-Host "    --- End optional values ---------------------------------------" -ForegroundColor DarkGray
     Write-Host ''
+}
+
+# GitHubRepo can come from CLI, config file, or this prompt. CLI values are
+# validated by [ValidatePattern] at bind time; config / prompt values are not,
+# so re-validate manually and re-prompt on a bad value.
+if ($GitHubRepo -and -not ($GitHubRepo -match '^[^/]+/[^/]+$')) {
+    Write-Warning "Loaded GitHubRepo '$GitHubRepo' is not in <owner>/<repo> form - will re-prompt."
+    $GitHubRepo = ''
+}
+if (-not $GitHubRepo) {
+    while ($true) {
+        $GitHubRepo = Read-RequiredString `
+            -Prompt 'GitHub repository (<owner>/<repo>)' `
+            -Hint @(
+                'Used to store GitHub repo secrets/variables and to federate Azure access for CI.',
+                "Example: 'contoso/rds-farm'."
+            )
+        if ($GitHubRepo -match '^[^/]+/[^/]+$') { break }
+        Write-Host "    '$GitHubRepo' is not in <owner>/<repo> form. Try again." -ForegroundColor Yellow
+        $GitHubRepo = ''
+    }
 }
 
 if (-not $AdDomainName) {
@@ -779,6 +960,17 @@ try {
     Write-Host "    Quota check skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
 }
 
+# Persist Step 1 answers BEFORE the proceed prompt so an abort here still
+# leaves the user's just-typed values saved for the next run.
+if (-not $NoSaveConfig) {
+    try {
+        Save-RdsFarmInitConfig -Path $ConfigFile
+        Write-Host "    Step 1 answers saved to: $ConfigFile" -ForegroundColor DarkGray
+    } catch {
+        Write-Warning "Could not save config to '$ConfigFile': $($_.Exception.Message)"
+    }
+}
+
 $confirm = Read-Host -Prompt 'Proceed? (y/N)'
 if ($confirm -notmatch '^(y|yes)$') {
     Write-Host "Aborted by user." -ForegroundColor Yellow
@@ -794,14 +986,14 @@ if (-not $SkipCiBootstrap) {
     Write-Host "    You will be prompted ONCE for DOMAIN_JOIN_PASSWORD and LOCAL_ADMIN_PASSWORD."
     Write-Host "    Both are stored only as GitHub repo secrets — never written to disk."
 
-    $ciArgs = @(
-        '-GitHubRepo',     $GitHubRepo
-        '-SubscriptionId', $SubscriptionId
-        '-AppDisplayName', $AppDisplayName
-    )
+    $ciArgs = @{
+        GitHubRepo     = $GitHubRepo
+        AppDisplayName = $AppDisplayName
+    }
+    if ($SubscriptionId) { $ciArgs['SubscriptionId'] = $SubscriptionId }
     # Do NOT pass -ArtifactsStorageAccount here; we'll set it ourselves in step 7
     # so the variable always reflects what the prereqs deployment actually produced.
-    if ($RequireProductionApproval) { $ciArgs += '-RequireProductionApproval' }
+    if ($RequireProductionApproval) { $ciArgs['RequireProductionApproval'] = $true }
 
     & $initCi @ciArgs
     if ($LASTEXITCODE -ne 0) {
@@ -874,14 +1066,14 @@ if (-not $SkipPrereqsDeploy) {
 Write-Host ""
 Write-Host "==> Step 5: TLS certificate (New-RdsCertificate.ps1)" -ForegroundColor Green
 
-$certArgs = @(
-    '-VaultName',       $KeyVaultName
-    '-CertName',        $CertName
-    '-Fqdn',            $PublicGatewayFqdn
-    '-Mode',            $CertMode
-    '-OutputBicepParam',$BicepParamFile
-)
-if ($CertMode -eq 'ImportPfx') { $certArgs += @('-PfxPath', $PfxPath) }
+$certArgs = @{
+    VaultName        = $KeyVaultName
+    CertName         = $CertName
+    Fqdn             = $PublicGatewayFqdn
+    Mode             = $CertMode
+    OutputBicepParam = $BicepParamFile
+}
+if ($CertMode -eq 'ImportPfx') { $certArgs['PfxPath'] = $PfxPath }
 
 & $newCert @certArgs
 if ($LASTEXITCODE -ne 0) {

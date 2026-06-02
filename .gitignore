@@ -26,3 +26,8 @@ Configuration.zip
 .env
 .env.*
 !.env.example
+
+# Persisted Step 1 answers from Initialize-RdsFarm.ps1 (contains subscription
+# IDs, AD domain names, internal IPs, allowed source CIDRs). Keep local.
+.rds-farm-init.config.psd1
+*.rds-farm-init.config.psd1
