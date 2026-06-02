@@ -207,7 +207,6 @@ jobs:
       always()
       && needs.package-dsc.result == 'success'
       && (needs.prereqs.result == 'skipped' || (needs.prereqs.result == 'success' && inputs.prereqs_action != 'what-if'))
-    environment: preview
     env:
       # Prefer the storage account just created by the prereqs job; otherwise fall back to the repo variable.
       ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.prereqs.outputs.artifacts_storage_account || vars.ARTIFACTS_STORAGE_ACCOUNT }}
