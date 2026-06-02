@@ -99,12 +99,19 @@ jobs:
           cd dsc
           zip -r ../Configuration.zip Configuration.ps1
           unzip -l ../Configuration.zip
+          # Stage Bootstrap.ps1 next to the zip so the audit artifact below
+          # captures both files CSE will download from the artifacts SA.
+          cp Bootstrap.ps1 ../Bootstrap.ps1
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dsc-configuration
-          path: Configuration.zip
+          # Audit-only payload: upload-artifacts re-reads dsc/Bootstrap.ps1
+          # directly from its own checkout when calling Publish-DscArtifact.ps1.
+          path: |
+            Configuration.zip
+            Bootstrap.ps1
           retention-days: 7
 
   upload-artifacts:
@@ -160,6 +167,12 @@ jobs:
       ARTIFACTS_LOCATION:        ${{ needs.upload-artifacts.outputs.artifacts_location }}
       # SA name is needed for the MSI-based blob existence check below.
       ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.upload-artifacts.outputs.artifacts_storage_account }}
+    outputs:
+      # Effective deployBastion value after the subnet existence check.
+      # When the bicepparam asks for bastion but the AzureBastionSubnet is
+      # missing from the VNet, this gets flipped to 'false' (with a warning)
+      # so the rest of the farm still deploys.
+      effective_deploy_bastion: ${{ steps.network.outputs.effective_deploy_bastion }}
     steps:
       - uses: actions/checkout@v4
 
@@ -215,6 +228,7 @@ jobs:
           rm -f "$TMP"
 
       - name: Existing VNet + subnet present and usable
+        id: network
         env:
           VNET:           ${{ steps.params.outputs.vnet }}
           VNET_RG:        ${{ steps.params.outputs.vnet_rg }}
@@ -245,12 +259,24 @@ jobs:
             echo "::error::Subnet too small: $AVAILABLE usable vs $NEEDED needed"; exit 1
           fi
 
+          # Effective bastion decision: start with whatever the bicepparam
+          # asks for, then downgrade to 'false' when deployBastion=true but
+          # the bastion subnet is missing. Soft fallback so the farm still
+          # deploys; the operator gets a warning to pre-create the subnet
+          # (Azure requires the exact name 'AzureBastionSubnet' and /26 or
+          # larger) and re-run if they want bastion next time.
+          EFFECTIVE_DEPLOY_BASTION="$DEPLOY_BASTION"
           if [ "$DEPLOY_BASTION" = "true" ]; then
-            if ! az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET" -n "$BASTION_SUBNET" -o none 2>/dev/null; then
-              echo "::error::deployBastion=true but $BASTION_SUBNET not present in $VNET"; exit 1
+            if az network vnet subnet show -g "$VNET_RG" --vnet-name "$VNET" -n "$BASTION_SUBNET" -o none 2>/dev/null; then
+              echo "[OK] $BASTION_SUBNET present - bastion will deploy"
+            else
+              echo "::warning::deployBastion=true but $BASTION_SUBNET is missing in $VNET - skipping bastion. Pre-create the subnet (exact name 'AzureBastionSubnet', /26 or larger) and re-run to provision it."
+              EFFECTIVE_DEPLOY_BASTION="false"
             fi
-            echo "[OK] $BASTION_SUBNET present"
+          else
+            echo "[OK] deployBastion=false - bastion deployment skipped"
           fi
+          echo "effective_deploy_bastion=$EFFECTIVE_DEPLOY_BASTION" >> "$GITHUB_OUTPUT"
 
       - name: Key Vault + cert reachable (if cert binding enabled)
         if: steps.params.outputs.cert_binding == 'true' || steps.params.outputs.cert_binding == 'True'
@@ -316,15 +342,19 @@ jobs:
         env:
           DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
           LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
+          EFFECTIVE_DEPLOY_BASTION: ${{ steps.network.outputs.effective_deploy_bastion }}
         run: |
           set -euo pipefail
           # `validate` checks RBAC + policy + template correctness more strictly
           # than `what-if` (which can mask some errors as ResourceNotFound).
+          # Pass the effective bastion decision so validate doesn't trip on a
+          # missing AzureBastionSubnet when we've already chosen to skip it.
           az deployment group validate \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --template-file  "$BICEP_FILE" \
             --parameters     "$BICEPPARAM_FILE" \
             --parameters     artifactsLocation="$ARTIFACTS_LOCATION" \
+            --parameters     deployBastion="$EFFECTIVE_DEPLOY_BASTION" \
             -o none
           echo "[OK] Bicep template validates against current state"
 
@@ -364,6 +394,7 @@ jobs:
           DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
           LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
           ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
+          EFFECTIVE_DEPLOY_BASTION: ${{ needs.pre-deploy-checks.outputs.effective_deploy_bastion }}
         run: |
           set -euo pipefail
           # Capture output so we can both stream it AND reuse it for the
@@ -374,6 +405,7 @@ jobs:
             --template-file  "$BICEP_FILE" \
             --parameters     "$BICEPPARAM_FILE" \
             --parameters     artifactsLocation="$ARTIFACTS_LOCATION" \
+            --parameters     deployBastion="$EFFECTIVE_DEPLOY_BASTION" \
             2>&1 | tee whatif.txt
 
       - name: Append what-if to job summary
@@ -422,6 +454,7 @@ jobs:
           DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
           LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
           ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
+          EFFECTIVE_DEPLOY_BASTION: ${{ needs.pre-deploy-checks.outputs.effective_deploy_bastion }}
         run: |
           set -euo pipefail
           OUTPUTS=$(az deployment group create \
@@ -429,6 +462,7 @@ jobs:
             --template-file  "$BICEP_FILE" \
             --parameters     "$BICEPPARAM_FILE" \
             --parameters     artifactsLocation="$ARTIFACTS_LOCATION" \
+            --parameters     deployBastion="$EFFECTIVE_DEPLOY_BASTION" \
             --query properties.outputs -o json)
 
           echo "$OUTPUTS"

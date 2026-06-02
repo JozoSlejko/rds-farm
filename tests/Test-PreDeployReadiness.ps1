@@ -183,7 +183,15 @@ if ($LASTEXITCODE -ne 0 -or -not $vnetJson) {
 
     if ($deployBast) {
         az network vnet subnet show -g $vnetRg --vnet-name $vnet -n $bastionSub -o none 2>$null
-        Write-TestResult "Bastion subnet '$bastionSub' present (deployBastion=true)" ($LASTEXITCODE -eq 0)
+        if ($LASTEXITCODE -eq 0) {
+            Write-TestResult "Bastion subnet '$bastionSub' present (deployBastion=true)" $true
+        } else {
+            # Soft fallback: deploy will skip bastion automatically (the CI
+            # pipeline overrides deployBastion=false in this case). Same
+            # behavior on the laptop path via Invoke-ManualDeploy.ps1.
+            Write-TestResult "Bastion subnet '$bastionSub' missing - bastion will be skipped at deploy time" $false `
+                "Pre-create '$bastionSub' (exact name 'AzureBastionSubnet', /26 or larger) in $vnet if you want bastion provisioned." -SoftWarn
+        }
     }
 }
 

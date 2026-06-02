@@ -1,26 +1,33 @@
 <#
 .SYNOPSIS
-    Package dsc/Configuration.ps1 and upload it to the artifacts storage account.
+    Package dsc/Configuration.ps1 + dsc/Bootstrap.ps1 and upload them to the
+    artifacts storage account.
 
 .DESCRIPTION
     Mirrors the `package-dsc` + `upload-artifacts` jobs in
     .github/workflows/deploy.yml for users running deployments by hand.
-    Idempotent: re-running just overwrites the blob.
+    Idempotent: re-running just overwrites the blobs.
 
     Steps (all idempotent):
       1. Compress dsc/Configuration.ps1 into Configuration.zip.
-      2. Upload the zip to <StorageAccount>/<Container>/<BlobName>
+      2. Upload Configuration.zip to <StorageAccount>/<Container>/<BlobName>
          using --auth-mode login (your Entra identity, no account keys).
-      3. Print the artifacts base URL.
+      3. Upload dsc/Bootstrap.ps1 to the same container (always as
+         Bootstrap.ps1) — CSE downloads both blobs side-by-side.
+      4. Print the artifacts base URL.
 
-    No SAS is generated. The DSC extension authenticates to blob storage with
-    the VM's user-assigned managed identity (Storage Blob Data Reader role on
-    the SA, granted by modules/sa-role.bicep). The tenant policy in use here
-    blocks both shared-key and SAS access, so this is the only viable path.
+    No SAS is generated. The Custom Script Extension authenticates to blob
+    storage with the VM's user-assigned managed identity (Storage Blob Data
+    Reader role on the SA, granted by modules/sa-role.bicep). The tenant
+    policy on the SA blocks both shared-key and SAS access; managed identity
+    is the only viable download path. (The legacy Microsoft.Powershell/DSC
+    extension was retired here because it silently ignores managedIdentity
+    in protectedSettings and falls back to anonymous downloads.)
 
     The output object has these properties:
       ArtifactsLocation   # e.g. https://contosordsart01.blob.core.windows.net/dsc/
-      BlobUrl             # full URL to the blob
+      BlobUrl             # full URL to Configuration.zip
+      BootstrapBlobUrl    # full URL to Bootstrap.ps1
 
     Capture the output to feed straight into Invoke-ManualDeploy.ps1 or to
     populate the ARTIFACTS_LOCATION environment variable.
@@ -38,6 +45,11 @@
 
 .PARAMETER ConfigurationPath
     Path to the DSC script to package. Default: <repo>/dsc/Configuration.ps1.
+
+.PARAMETER BootstrapPath
+    Path to the CSE bootstrap script. Default: <repo>/dsc/Bootstrap.ps1. The
+    blob is always uploaded with the name 'Bootstrap.ps1' because the URL is
+    baked into the CustomScriptExtension fileUris in modules/dsc.bicep.
 
 .PARAMETER Repo
     Optional GitHub repo in the format <org>/<repo>. When supplied, the script
@@ -69,6 +81,7 @@ param(
     [string]$Container = 'dsc',
     [string]$BlobName  = 'Configuration.zip',
     [string]$ConfigurationPath = (Join-Path $PSScriptRoot '..' 'dsc' 'Configuration.ps1'),
+    [string]$BootstrapPath     = (Join-Path $PSScriptRoot '..' 'dsc' 'Bootstrap.ps1'),
     [ValidatePattern('^[^/]+/[^/]+$')]
     [string]$Repo,
     [switch]$SetEnvVars
@@ -94,7 +107,12 @@ $ConfigurationPath = (Resolve-Path -LiteralPath $ConfigurationPath).Path
 if (-not (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf)) {
     throw "DSC configuration not found: $ConfigurationPath"
 }
-Write-Host "    Source : $ConfigurationPath"
+$BootstrapPath = (Resolve-Path -LiteralPath $BootstrapPath).Path
+if (-not (Test-Path -LiteralPath $BootstrapPath -PathType Leaf)) {
+    throw "Bootstrap script not found: $BootstrapPath"
+}
+Write-Host "    Config    : $ConfigurationPath"
+Write-Host "    Bootstrap : $BootstrapPath"
 
 if (-not $StorageAccount) {
     if ($Repo) {
@@ -147,10 +165,26 @@ az storage blob upload `
 if ($LASTEXITCODE -ne 0) {
     throw "Blob upload failed. Make sure you have 'Storage Blob Data Contributor' on $StorageAccount."
 }
-Write-Host "    Uploaded."
+Write-Host "    Uploaded $BlobName."
+
+# Bootstrap.ps1 is downloaded by CSE alongside Configuration.zip into the same
+# Downloads\<seq> directory. The blob name must stay as 'Bootstrap.ps1' to
+# match the fileUris baked into modules/dsc.bicep.
+az storage blob upload `
+    --account-name   $StorageAccount `
+    --container-name $Container `
+    --name           'Bootstrap.ps1' `
+    --file           $BootstrapPath `
+    --overwrite `
+    --auth-mode      login | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Bootstrap.ps1 upload failed. Make sure you have 'Storage Blob Data Contributor' on $StorageAccount."
+}
+Write-Host "    Uploaded Bootstrap.ps1."
 
 $artifactsLocation = "https://$StorageAccount.blob.core.windows.net/$Container/"
-$blobUrl = "$artifactsLocation$BlobName"
+$blobUrl           = "$artifactsLocation$BlobName"
+$bootstrapBlobUrl  = "${artifactsLocation}Bootstrap.ps1"
 
 # ---------------------------------------------------------------------------
 # 3. Result
@@ -159,6 +193,7 @@ Write-Host ""
 Write-Host "==================== Done ====================" -ForegroundColor Green
 Write-Host "ArtifactsLocation : $artifactsLocation"
 Write-Host "BlobUrl           : $blobUrl"
+Write-Host "BootstrapBlobUrl  : $bootstrapBlobUrl"
 Write-Host "Auth              : VM managed identity (Storage Blob Data Reader)"
 
 if ($SetEnvVars) {
@@ -170,4 +205,5 @@ if ($SetEnvVars) {
 [pscustomobject]@{
     ArtifactsLocation = $artifactsLocation
     BlobUrl           = $blobUrl
+    BootstrapBlobUrl  = $bootstrapBlobUrl
 }

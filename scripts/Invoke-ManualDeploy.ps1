@@ -218,12 +218,47 @@ if (-not $SkipReadinessCheck) {
 # ---------------------------------------------------------------------------
 # 5. What-if (unless suppressed) + optional deploy
 # ---------------------------------------------------------------------------
+
+# Effective bastion decision (mirrors deploy.yml -> pre-deploy-checks job):
+# if deployBastion=true in the bicepparam but AzureBastionSubnet is missing
+# from the existing VNet, downgrade to false so the rest of the farm still
+# deploys. Compile the bicepparam to JSON to read the values without taking a
+# dependency on parsing Bicep ourselves.
+$effectiveDeployBastion = $null
+$tmpParams = New-TemporaryFile
+try {
+    az bicep build-params --file $BicepParamFile --outfile $tmpParams.FullName 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $compiled = Get-Content -LiteralPath $tmpParams.FullName -Raw | ConvertFrom-Json
+        $deployBastion = [bool]$compiled.parameters.deployBastion.value
+        $vnetName      = [string]$compiled.parameters.existingVnetName.value
+        $vnetRg        = [string]$compiled.parameters.existingVnetResourceGroup.value
+        $bastionSubnet = [string]$compiled.parameters.bastionSubnetName.value
+        if ($deployBastion) {
+            az network vnet subnet show -g $vnetRg --vnet-name $vnetName -n $bastionSubnet -o none 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $effectiveDeployBastion = 'true'
+            } else {
+                Write-Host "    [WARN] deployBastion=true but '$bastionSubnet' is missing in $vnetName - bastion will be skipped." -ForegroundColor Yellow
+                $effectiveDeployBastion = 'false'
+            }
+        } else {
+            $effectiveDeployBastion = 'false'
+        }
+    }
+} finally {
+    Remove-Item -LiteralPath $tmpParams.FullName -Force -ErrorAction SilentlyContinue
+}
+
 $commonArgs = @(
     '--resource-group', $ResourceGroup,
     '--template-file',  $BicepFile,
     '--parameters',     $BicepParamFile,
     '--parameters',     "artifactsLocation=$($env:ARTIFACTS_LOCATION)"
 )
+if ($effectiveDeployBastion) {
+    $commonArgs += @('--parameters', "deployBastion=$effectiveDeployBastion")
+}
 
 if (-not $SkipWhatIf) {
     Write-Host ""
