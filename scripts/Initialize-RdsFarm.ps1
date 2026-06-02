@@ -815,6 +815,9 @@ Write-Host "  TLS cert          : $CertName (Subject=$certificateSubject)"
 Write-Host "  Bicepparam        : $BicepParamFile (compiles)"
 Write-Host "  GitHub repo       : $GitHubRepo (secrets + variable set, envs created)"
 Write-Host ""
+Write-Host "Verify Tier 0 (one command, read-only):" -ForegroundColor Cyan
+Write-Host "  ./tests/Test-RdsFarmInit.ps1 -GitHubRepo $GitHubRepo"
+Write-Host ""
 Write-Host "Next steps (Tier 1 — recommended pipeline path):" -ForegroundColor Cyan
 Write-Host "  git add main.bicepparam"
 Write-Host "  git commit -m 'Initialize farm config'"

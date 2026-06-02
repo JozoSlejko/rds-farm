@@ -3,9 +3,49 @@
 [← Back to main README](../README.md)
 
 > [!NOTE]
-> **Where this fits in the tier model.** Layers 1–4 below are Tier 2 (ad-hoc, from your laptop or a jumpbox). Layer 5 is Tier 1 (the pipeline runs the same checks automatically on every push/PR/deploy). The local-only [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) wraps Layer 1 with extra Azure-side pre-flight checks and is the laptop equivalent of the pipeline's `pre-deploy-checks` job.
+> **Where this fits in the tier model.** Section 0 verifies Tier 0 (the local bootstrap done by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)). Sections 1–4 are Tier 2 checks you run ad-hoc from your laptop or a jumpbox. Section 5 is Tier 1 — the pipeline runs the same checks automatically on every push / PR / deploy. The local-only [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) wraps Section 1 with extra Azure-side pre-flight checks and is the laptop equivalent of the pipeline's `pre-deploy-checks` job.
 
-A staged set of checks: **(1)** template sanity before you deploy, **(2)** Azure-side smoke tests right after `az deployment group create` returns, **(3)** RDS-role checks on the VMs themselves, **(4)** end-to-end client connection, and **(5)** continuous testing in CI. Run them in order — most "RD Web won't open" tickets are caught by checks 2 or 3.
+A staged set of checks: **(0)** Tier-0 bootstrap is intact, **(1)** template sanity before you deploy, **(2)** Azure-side smoke tests right after `az deployment group create` returns, **(3)** RDS-role checks on the VMs themselves, **(4)** end-to-end client connection, and **(5)** continuous testing in CI. Run them in order — most "RD Web won't open" tickets are caught by checks 2 or 3.
+
+## 0. Tier-0 bootstrap verification
+
+[`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) is the **doer** — it provisions the Entra app + federated credentials, sets the repo secrets, creates the Key Vault + storage account, issues / imports the TLS cert, and patches [`main.bicepparam`](../main.bicepparam). It validates each step as it runs (and throws on failure), but it does **not** re-read its work from Azure afterwards. The scripts in this section are the **checkers** — read-only, idempotent, safe to re-run any time.
+
+### One-command verifier (recommended)
+
+```powershell
+./tests/Test-RdsFarmInit.ps1 -GitHubRepo <owner>/<repo>
+# Exits 0 if everything Initialize-RdsFarm.ps1 set up is still intact, 1 otherwise.
+```
+
+[`tests/Test-RdsFarmInit.ps1`](../tests/Test-RdsFarmInit.ps1) is a thin wrapper that runs the three Tier-0 verifiers below in sequence and prints a single PASS/FAIL summary. Use it after any of these:
+
+- You just finished a fresh `Initialize-RdsFarm.ps1` run and want a sanity gate before pushing.
+- Someone "fixed" a role assignment / secret / federated credential by hand and you want to confirm nothing else regressed.
+- You're about to fire a manual deploy from a fresh shell ([`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1)) and want to confirm the bicepparam + KV cert are still wired correctly.
+
+Useful switches:
+
+```powershell
+# Config-only (no Azure / no gh required). Just checks the bicepparam.
+./tests/Test-RdsFarmInit.ps1 -GitHubRepo <owner>/<repo> -SkipCi -SkipPreDeploy
+
+# Non-default farm RG / region
+./tests/Test-RdsFarmInit.ps1 -GitHubRepo <owner>/<repo> -ResourceGroup my-rds-rg -Location northeurope
+
+# When you don't have rights to create the target RG locally for `az deployment group validate`
+./tests/Test-RdsFarmInit.ps1 -GitHubRepo <owner>/<repo> -SkipBicepValidate
+```
+
+### Or run the three child verifiers individually
+
+| Script | Covers | Needs |
+| --- | --- | --- |
+| [`tests/Test-CiPrerequisites.ps1`](../tests/Test-CiPrerequisites.ps1) | Entra app exists, service principal exists, all 4 federated credentials present with expected subjects, sub-scope role assignments (`Contributor` + `Role Based Access Control Administrator`), 5 repo secrets set, `ARTIFACTS_STORAGE_ACCOUNT` repo variable + the SA it points at, `preview` + `production` GitHub environments exist | `az` + `gh` signed in, Reader on the subscription |
+| [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1) | `main.bicepparam` compiles (with `readEnvironmentVariable` resolution), guard-rails hold (no `0.0.0.0/0`, valid AD DNS IP, NetBIOS-safe naming, KV cert URI shape when `enableCertificateBinding = true`) | none — pure config check |
+| [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) | Existing VNet + RDS subnet present with enough usable IPs, Key Vault exists in RBAC mode, referenced cert exists with `exportable: true` and 30+ days to expiry, (optional) `Configuration.zip` reachable via SAS, `az deployment group validate` against the target RG | `az` signed in, Reader on the VNet RG + KV RG + Contributor on the target RG (for the implicit `az group create` step 4 makes — use `-SkipBicepValidate` to skip it) |
+
+These also run inside [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) as the `pre-deploy-checks` job, except `Test-CiPrerequisites.ps1` which is a manual sanity tool (CI itself **is** the prerequisites — if they were broken, the workflow could not have started).
 
 ## 1. Pre-deployment (no resources touched)
 
@@ -153,12 +193,19 @@ The `.github/workflows/deploy.yml` pipeline runs all of the above automatically,
 | 2. Pre-deploy | `pre-deploy-checks` | after `upload-artifacts`, before `what-if`/`deploy` | yes (read-only) | existing VNet/subnet present + has enough free IPs, Bastion subnet (if `deployBastion=true`), Key Vault is RBAC-enabled and cert is exportable + not expiring, `Configuration.zip` reachable via SAS, `az deployment group validate` (catches RBAC / policy errors that `what-if` masks) |
 | 3. Post-deploy | `post-deploy-tests` | after `deploy` succeeds on `main` | yes | every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, `gatewayFqdn` resolves, `https://<fqdn>/RDWeb/` returns 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`), vanity-CNAME (`publicGatewayFqdn`) resolves to the LB if different from the Azure-issued FQDN (soft-warn) |
 
-The three test PowerShell scripts also run standalone:
+The three test PowerShell scripts in CI also run standalone — and there are three more for local-only use:
 
 ```powershell
+# Section 0 — verify Tier 0 (local, after Initialize-RdsFarm.ps1)
+./tests/Test-RdsFarmInit.ps1 -GitHubRepo <owner>/<repo>     # one-command wrapper
+./tests/Test-CiPrerequisites.ps1 -GitHubRepo <owner>/<repo> # CI prereqs only (manual sanity tool)
+
 # Layer 1 — local, no Azure
 ./tests/Test-DscConfiguration.ps1
 ./tests/Test-BicepParamValues.ps1
+
+# Layer 2 — local, Azure read-only
+./tests/Test-PreDeployReadiness.ps1
 
 # Layer 3 — after a deploy, requires az login + RG read access
 ./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg

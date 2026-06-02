@@ -291,7 +291,8 @@ rds-farm/
 │   ├── Test-BicepParamValues.ps1       # compile main.bicepparam + value-invariant checks
 │   ├── Test-PostDeployHealth.ps1       # post-deploy: extensions, RH, LB, DNS, RD Web
 │   ├── Test-CiPrerequisites.ps1        # verify Initialize-CiPrerequisites.ps1 output (read-only)
-│   └── Test-PreDeployReadiness.ps1     # local equivalent of CI pre-deploy-checks job
+│   ├── Test-PreDeployReadiness.ps1     # local equivalent of CI pre-deploy-checks job
+│   └── Test-RdsFarmInit.ps1            # one-command verifier for everything Initialize-RdsFarm.ps1 set up
 ├── scripts/                    # bootstrap + helper scripts
 │   ├── Initialize-RdsFarm.ps1          # Tier-0 ORCHESTRATOR — calls the four below in order
 │   ├── Initialize-CiPrerequisites.ps1  # Tier-0: Entra app + federated creds + RBAC + GitHub secrets
