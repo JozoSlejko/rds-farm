@@ -3,13 +3,13 @@
 [← Back to main README](../README.md)
 
 > [!IMPORTANT]
-> **Use the pipeline.** The supported deploy path is [CI/CD with GitHub Actions](./ci-cd.md) — every push to `main` runs `what-if` and (after approval) `deploy`. This page documents the same `main.bicep` / `main.bicepparam` flow as a **Tier 1 alternative** for the handful of cases where CI isn't an option:
+> **Use the pipeline.** The supported deploy path is [CI/CD with GitHub Actions](./ci-cd.md) — run **Actions → Deploy RDS Farm → Run workflow** to launch `what-if` or `deploy` on demand. This page documents the same `main.bicep` / `main.bicepparam` flow as a **Tier 1 alternative** for the handful of cases where CI isn't an option:
 >
 > - CI is temporarily unavailable (workflow disabled, GitHub outage).
 > - You're iterating on `main.bicep` or `dsc/Configuration.ps1` and want a fast local loop.
 > - You don't have repo write access to wire up GitHub Actions yet.
 >
-> If none of those apply, close this page and `git push` instead. The pipeline supplies the four CI-injected values (`domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, `artifactsLocation`); the laptop path asks you for them at runtime.
+> If none of those apply, close this page and `git push` instead. The pipeline supplies the three CI-injected values (`domainJoinPassword`, `localAdminPassword`, `artifactsLocation`); the laptop path asks you for them at runtime.
 
 See [README → Deployment guide](../README.md#deployment-guide) for the bigger picture.
 
@@ -49,11 +49,11 @@ After step 12 returns success, opening `https://<publicGatewayFqdn>/RDWeb/` from
 > ./scripts/Invoke-ManualDeploy.ps1 -Action deploy   -StorageAccount contosoartifactssa
 > ```
 >
-> The wrapper packages `dsc/Configuration.ps1` via [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1), mints a user-delegation SAS, sets `ARTIFACTS_SAS`/`ARTIFACTS_STORAGE_ACCOUNT` for the process, prompts for `DOMAIN_JOIN_PASSWORD`/`LOCAL_ADMIN_PASSWORD` if missing, and runs `az deployment group what-if` (always) and `az deployment group create` (when `-Action deploy`). The sections below remain the canonical reference for what each step does under the hood.
+> The wrapper packages `dsc/Configuration.ps1` via [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1), sets `ARTIFACTS_LOCATION`/`ARTIFACTS_STORAGE_ACCOUNT` for the process, prompts for `DOMAIN_JOIN_PASSWORD`/`LOCAL_ADMIN_PASSWORD` if missing, and runs `az deployment group what-if` (always) and `az deployment group create` (when `-Action deploy`). The DSC extension reads `Configuration.zip` back at apply-time using the VM's user-assigned managed identity (no SAS — the SA blocks SAS via tenant policy). The sections below remain the canonical reference for what each step does under the hood.
 
 ## 1. Package and upload DSC artifacts
 
-Use [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) — the same script the pipeline calls. It zips `dsc/Configuration.ps1`, uploads via `az storage blob upload --auth-mode login` (no account keys), and mints a 2-hour user-delegation SAS:
+Use [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) — the same script the pipeline calls. It zips `dsc/Configuration.ps1` and uploads via `az storage blob upload --auth-mode login` (no account keys, no SAS):
 
 ```powershell
 cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm
@@ -61,11 +61,13 @@ cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm
 $result = ./scripts/Publish-DscArtifact.ps1 `
   -StorageAccount contosoartifactssa `
   -Container dsc
-# $result has .ArtifactsLocation (URL ending /) and .Sas (token with leading '?')
+# $result has .ArtifactsLocation (URL ending /) and .BlobUrl
 
-$env:ARTIFACTS_LOCATION = $result.ArtifactsLocation
-$env:ARTIFACTS_SAS      = $result.Sas
+$env:ARTIFACTS_LOCATION        = $result.ArtifactsLocation
+$env:ARTIFACTS_STORAGE_ACCOUNT = 'contosoartifactssa'   # consumed by the readiness test
 ```
+
+The DSC extension reads the blob back at apply-time using the VM's user-assigned managed identity (Storage Blob Data Reader on the SA, granted by [`modules/sa-role.bicep`](../modules/sa-role.bicep)). The artifacts SA has `allowSharedKeyAccess: false` and tenant policy forbids SAS, so MSI auth is the only viable path.
 
 If you'd rather run the underlying `az` commands by hand, they are:
 
@@ -79,20 +81,22 @@ az storage blob upload `
   --file .\Configuration.zip `
   --auth-mode login --overwrite
 
-$expiry = (Get-Date).ToUniversalTime().AddHours(2).ToString('yyyy-MM-ddTHH:mm:ssZ')
-$sas    = az storage blob generate-sas `
-  --account-name contosoartifactssa --container-name dsc --name Configuration.zip `
-  --permissions r --expiry $expiry --auth-mode login --as-user -o tsv
+# Verify (also what the pre-deploy-checks job runs):
+az storage blob exists `
+  --account-name contosoartifactssa `
+  --container-name dsc `
+  --name Configuration.zip `
+  --auth-mode login --query exists -o tsv
 ```
 
 ## 2. Set secrets in your shell
 
-These three env vars provide the values for the **four CI-injected `main.bicepparam` parameters** (`domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, plus `artifactsLocation` which we pass via `--parameters` in step 5):
+These env vars provide the values for the **two CI-injected `main.bicepparam` parameters** (`domainJoinPassword`, `localAdminPassword`) plus `artifactsLocation` (which we pass via `--parameters` in step 5):
 
 ```powershell
 $env:DOMAIN_JOIN_PASSWORD = '<svc-domainjoin password>'
 $env:LOCAL_ADMIN_PASSWORD = '<local admin password>'
-# $env:ARTIFACTS_LOCATION and $env:ARTIFACTS_SAS were set in step 1
+# $env:ARTIFACTS_LOCATION was set in step 1
 ```
 
 ## 3. Create the TLS certificate in Key Vault *(only if Tier 0 did not)*
@@ -322,7 +326,7 @@ param publicGatewayFqdn        = 'rds.contoso.com'    // vanity FQDN clients typ
 param certificateSubject       = 'CN=rds.contoso.com' // must be a substring of the cert's actual Subject
 ```
 
-**Do not** put real values into `domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken`, or `artifactsLocation` — those come from env vars (step 2) and the `--parameters` override (step 5). Leave them as their `readEnvironmentVariable(...)` defaults.
+**Do not** put real values into `domainJoinPassword`, `localAdminPassword`, or `artifactsLocation` — those come from env vars (step 2) and the `--parameters` override (step 5). Leave them as their `readEnvironmentVariable(...)` defaults.
 
 Full list of every parameter and its source: [README → Parameters reference](../README.md#parameters-reference-mainbicepparam).
 

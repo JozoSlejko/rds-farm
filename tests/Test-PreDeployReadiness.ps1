@@ -15,7 +15,10 @@
            - The certificate referenced by keyVaultCertSecretUri exists.
            - Cert policy has keyProperties.exportable = true.
            - Cert expires more than 30 days from now (soft warn otherwise).
-      3. If $env:ARTIFACTS_LOCATION + $env:ARTIFACTS_SAS are set, HEAD
+      3. If $env:ARTIFACTS_STORAGE_ACCOUNT is set (or readable from
+         bicepparam), verify Configuration.zip exists in the dsc container
+         using `az storage blob exists --auth-mode login` (managed-identity-
+         compatible; no SAS — the SA blocks SAS via tenant policy).
          Configuration.zip via the SAS and require 200 OK. Skipped when
          the env vars are missing (you haven't published yet — that's fine
          for a pure "is my config valid?" check).
@@ -129,9 +132,6 @@ foreach ($v in 'DOMAIN_JOIN_PASSWORD', 'LOCAL_ADMIN_PASSWORD') {
         [Environment]::SetEnvironmentVariable($v, 'placeholder-for-validation-only', 'Process')
     }
 }
-if ($null -eq [Environment]::GetEnvironmentVariable('ARTIFACTS_SAS')) {
-    [Environment]::SetEnvironmentVariable('ARTIFACTS_SAS', '', 'Process')
-}
 
 $tmp = New-TemporaryFile
 try {
@@ -235,20 +235,36 @@ if (-not $certEnabled) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Artifacts SAS reachability
+# 3. Artifacts blob reachability (managed-identity auth)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "==> Step 3: Artifacts blob reachable via SAS" -ForegroundColor Green
-if (-not $env:ARTIFACTS_LOCATION -or -not $env:ARTIFACTS_SAS) {
-    Write-Host "    `$env:ARTIFACTS_LOCATION / `$env:ARTIFACTS_SAS not set — skipped"
-    Write-Host "    (Run scripts/Publish-DscArtifact.ps1 -SetEnvVars first to enable this check.)" -ForegroundColor DarkYellow
+Write-Host "==> Step 3: Artifacts blob reachable (MSI auth)" -ForegroundColor Green
+
+# Resolve the SA name from env (preferred) or from the compiled bicepparam.
+$artifactsSa = $env:ARTIFACTS_STORAGE_ACCOUNT
+if (-not $artifactsSa) {
+    $artifactsSa = Get-CompiledParam $paramJson 'artifactsStorageAccountName'
+}
+$artifactsContainer = 'dsc'
+$artifactsBlobName  = 'Configuration.zip'
+
+if (-not $artifactsSa) {
+    Write-Host "    Storage account name not resolved (env ARTIFACTS_STORAGE_ACCOUNT empty and bicepparam has no artifactsStorageAccountName) — skipped" -ForegroundColor DarkYellow
 } else {
-    $url = "$($env:ARTIFACTS_LOCATION)Configuration.zip$($env:ARTIFACTS_SAS)"
-    try {
-        $resp = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
-        Write-TestResult "Configuration.zip reachable via SAS (HTTP $($resp.StatusCode))" ($resp.StatusCode -eq 200)
-    } catch {
-        Write-TestResult "Configuration.zip reachable via SAS" $false $_.Exception.Message
+    $exists = az storage blob exists `
+        --account-name   $artifactsSa `
+        --container-name $artifactsContainer `
+        --name           $artifactsBlobName `
+        --auth-mode      login `
+        --query exists -o tsv 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-TestResult "Blob $artifactsContainer/$artifactsBlobName exists on $artifactsSa" $false `
+            'az storage blob exists failed. Ensure you have Storage Blob Data Reader on the SA (login auth).'
+    } elseif ($exists -eq 'true') {
+        Write-TestResult "Blob $artifactsContainer/$artifactsBlobName exists on $artifactsSa" $true
+    } else {
+        Write-TestResult "Blob $artifactsContainer/$artifactsBlobName exists on $artifactsSa" $false `
+            'Run scripts/Publish-DscArtifact.ps1 (or push to trigger the workflow) before deploying.'
     }
 }
 

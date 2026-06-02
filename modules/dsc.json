@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "15204702108335939734"
+    }
+  },
+  "parameters": {
+    "vmName": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string"
+    },
+    "configurationFunction": {
+      "type": "string",
+      "metadata": {
+        "description": "e.g. Configuration.ps1\\Gateway"
+      }
+    },
+    "configurationProperties": {
+      "type": "object"
+    },
+    "protectedItems": {
+      "type": "secureObject",
+      "defaultValue": {}
+    },
+    "artifactsLocation": {
+      "type": "string",
+      "metadata": {
+        "description": "Base blob URL (no SAS) containing Configuration.zip, e.g. https://<sa>.blob.core.windows.net/dsc/. The extension downloads <artifactsLocation>Configuration.zip using the VM's user-assigned managed identity (Storage Blob Data Reader on the SA)."
+      }
+    },
+    "userAssignedIdentityClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Client ID of the user-assigned managed identity attached to the VM. The DSC extension uses it to OAuth-download Configuration.zip from the storage account (the SA disallows shared-key access)."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2024-07-01",
+      "name": "[format('{0}/{1}', parameters('vmName'), 'Microsoft.Powershell.DSC')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publisher": "Microsoft.Powershell",
+        "type": "DSC",
+        "typeHandlerVersion": "2.83",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "wmfVersion": "latest",
+          "configuration": {
+            "url": "[uri(parameters('artifactsLocation'), 'Configuration.zip')]",
+            "script": "Configuration.ps1",
+            "function": "[last(split(parameters('configurationFunction'), '\\'))]"
+          },
+          "configurationArguments": "[parameters('configurationProperties')]"
+        },
+        "protectedSettings": {
+          "managedIdentity": {
+            "clientId": "[parameters('userAssignedIdentityClientId')]"
+          },
+          "configurationArguments": "[parameters('protectedItems')]"
+        }
+      }
+    }
+  ]
+}

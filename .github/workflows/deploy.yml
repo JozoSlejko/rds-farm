@@ -1,20 +1,8 @@
 name: Deploy RDS Farm
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '**.bicep'
-      - '**.bicepparam'
-      - 'dsc/**'
-      - '.github/workflows/deploy.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - '**.bicep'
-      - '**.bicepparam'
-      - 'dsc/**'
-      - '.github/workflows/deploy.yml'
+  # Manual-only: deploys to live Azure infra, so we never run on push/PR.
+  # Re-add `push:` / `pull_request:` blocks if you want auto what-if on commits.
   workflow_dispatch:
     inputs:
       action:
@@ -31,7 +19,6 @@ on:
 permissions:
   id-token: write   # OIDC federated credential
   contents: read
-  pull-requests: write
 
 env:
   # AZURE_LOCATION + AZURE_RESOURCE_GROUP are sourced from repo variables that
@@ -67,7 +54,6 @@ jobs:
         env:
           DOMAIN_JOIN_PASSWORD: dummy-for-lint-only
           LOCAL_ADMIN_PASSWORD: dummy-for-lint-only
-          ARTIFACTS_SAS: ''
         run: bicep build-params "$BICEPPARAM_FILE"
 
       - name: Bicep build (prereqs)
@@ -104,7 +90,6 @@ jobs:
         env:
           DOMAIN_JOIN_PASSWORD: dummy-for-validation-only
           LOCAL_ADMIN_PASSWORD: dummy-for-validation-only
-          ARTIFACTS_SAS: ''
         run: ./tests/Test-BicepParamValues.ps1
 
   prereqs:
@@ -215,8 +200,8 @@ jobs:
       # Prefer the storage account just created by the prereqs job; otherwise fall back to the repo variable.
       ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.prereqs.outputs.artifacts_storage_account || vars.ARTIFACTS_STORAGE_ACCOUNT }}
     outputs:
-      artifacts_location: ${{ steps.publish.outputs.artifacts_location }}
-      artifacts_sas: ${{ steps.publish.outputs.sas }}
+      artifacts_location:        ${{ steps.publish.outputs.artifacts_location }}
+      artifacts_storage_account: ${{ steps.publish.outputs.artifacts_storage_account }}
     steps:
       - uses: actions/checkout@v4
 
@@ -235,10 +220,8 @@ jobs:
           $result = ./scripts/Publish-DscArtifact.ps1 `
               -StorageAccount $env:ARTIFACTS_STORAGE_ACCOUNT `
               -Container      $env:ARTIFACTS_CONTAINER
-          # Mask the SAS in logs before exporting it as a job output.
-          Write-Host "::add-mask::$($result.ArtifactsSas)"
-          "artifacts_location=$($result.ArtifactsLocation)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "sas=$($result.ArtifactsSas)"                     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "artifacts_location=$($result.ArtifactsLocation)"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "artifacts_storage_account=$env:ARTIFACTS_STORAGE_ACCOUNT"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
   pre-deploy-checks:
     name: Pre-deploy Infra Checks
@@ -249,8 +232,9 @@ jobs:
     if: always() && needs.upload-artifacts.result == 'success'
     environment: preview
     env:
-      ARTIFACTS_SAS:      ${{ needs.upload-artifacts.outputs.artifacts_sas }}
-      ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
+      ARTIFACTS_LOCATION:        ${{ needs.upload-artifacts.outputs.artifacts_location }}
+      # SA name is needed for the MSI-based blob existence check below.
+      ARTIFACTS_STORAGE_ACCOUNT: ${{ needs.upload-artifacts.outputs.artifacts_storage_account }}
     steps:
       - uses: actions/checkout@v4
 
@@ -369,16 +353,22 @@ jobs:
             echo "::warning::Cert expires in $DAYS_LEFT days; consider renewing soon"
           fi
 
-      - name: Artifacts blob reachable via SAS
+      - name: Artifacts blob exists (managed-identity auth)
         run: |
           set -euo pipefail
-          URL="${ARTIFACTS_LOCATION}Configuration.zip${ARTIFACTS_SAS}"
-          # -I HEAD; mask the SAS in the curl output
-          HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I "$URL")
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Configuration.zip not reachable via SAS (HTTP $HTTP_CODE)"; exit 1
+          # The SA has allowSharedKeyAccess=false and tenant policy forbids SAS,
+          # so we use OAuth via --auth-mode login. The CI SP has Storage Blob
+          # Data Contributor on the SA (granted by the prereqs template).
+          EXISTS=$(az storage blob exists \
+            --account-name   "$ARTIFACTS_STORAGE_ACCOUNT" \
+            --container-name "$ARTIFACTS_CONTAINER" \
+            --name           Configuration.zip \
+            --auth-mode      login \
+            --query exists -o tsv)
+          if [ "$EXISTS" != "true" ]; then
+            echo "::error::Configuration.zip not found in $ARTIFACTS_STORAGE_ACCOUNT/$ARTIFACTS_CONTAINER"; exit 1
           fi
-          echo "[OK] Configuration.zip reachable via SAS (HTTP $HTTP_CODE)"
+          echo "[OK] Configuration.zip present in $ARTIFACTS_STORAGE_ACCOUNT/$ARTIFACTS_CONTAINER"
 
       - name: ARM template validate
         env:
@@ -400,7 +390,7 @@ jobs:
     name: What-If
     runs-on: ubuntu-latest
     needs: [upload-artifacts, pre-deploy-checks]
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.action == 'what-if')
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'what-if'
     environment: preview
     steps:
       - uses: actions/checkout@v4
@@ -421,13 +411,12 @@ jobs:
         env:
           DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
           LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
-          ARTIFACTS_SAS: ${{ needs.upload-artifacts.outputs.artifacts_sas }}
           ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
         run: |
           set -euo pipefail
           # Capture output so we can both stream it AND reuse it for the
-          # job summary + PR comment. `tee` keeps the console output
-          # readable for anyone watching the run live.
+          # job summary. `tee` keeps the console output readable for
+          # anyone watching the run live.
           az deployment group what-if \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --template-file  "$BICEP_FILE" \
@@ -446,56 +435,11 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Post what-if as PR comment
-        if: github.event_name == 'pull_request' && hashFiles('whatif.txt') != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO:      ${{ github.repository }}
-          RUN_URL:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          MARKER='<!-- rds-farm-whatif -->'
-
-          # Build the comment body (collapsed by default so long plans don't
-          # spam the PR conversation).
-          {
-            echo "$MARKER"
-            echo "### What-if plan for \`$AZURE_RESOURCE_GROUP\`"
-            echo ""
-            echo "Run: [\`${{ github.run_id }}\`]($RUN_URL)"
-            echo ""
-            echo "<details><summary>Click to expand resource diff</summary>"
-            echo ""
-            echo '```'
-            # Trim to 60 KB so we stay under GitHub's 65 KB comment cap.
-            head -c 61440 whatif.txt
-            if [ "$(wc -c < whatif.txt)" -gt 61440 ]; then
-              echo ""
-              echo "... (truncated; see [job summary]($RUN_URL) for full output)"
-            fi
-            echo '```'
-            echo ""
-            echo "</details>"
-          } > whatif-comment.md
-
-          # Upsert: delete prior bot comments that carry our marker, then post fresh.
-          PRIOR_IDS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
-            --jq ".[] | select(.user.login == \"github-actions[bot]\") | select(.body | contains(\"$MARKER\")) | .id" \
-            || true)
-          for ID in $PRIOR_IDS; do
-            gh api -X DELETE "repos/$REPO/issues/comments/$ID" || true
-          done
-
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file whatif-comment.md
-
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
     needs: [upload-artifacts, pre-deploy-checks]
-    if: |
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
-      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
     environment: production
     steps:
       - uses: actions/checkout@v4
@@ -516,7 +460,6 @@ jobs:
         env:
           DOMAIN_JOIN_PASSWORD: ${{ secrets.DOMAIN_JOIN_PASSWORD }}
           LOCAL_ADMIN_PASSWORD: ${{ secrets.LOCAL_ADMIN_PASSWORD }}
-          ARTIFACTS_SAS: ${{ needs.upload-artifacts.outputs.artifacts_sas }}
           ARTIFACTS_LOCATION: ${{ needs.upload-artifacts.outputs.artifacts_location }}
         run: |
           set -euo pipefail

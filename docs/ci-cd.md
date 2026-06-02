@@ -5,25 +5,27 @@
 > [!NOTE]
 > **Where this fits in the tier model.** Everything on this page is either **Tier 0** (the one-time bootstrap — normally driven by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)) or **Tier 1** (the pipeline itself — runs in GitHub Actions on every push/PR). See [README → Deployment guide](../README.md#deployment-guide).
 >
-> **What `main.bicepparam` values does the pipeline auto-supply?** Four: `domainJoinPassword`, `localAdminPassword`, `artifactsLocationSasToken` (all via `readEnvironmentVariable(...)`), and `artifactsLocation` (via `--parameters` override from the `upload-artifacts` job output). See [README → Parameters reference](../README.md#parameters-reference-mainbicepparam) for the full per-parameter source.
+> **What `main.bicepparam` values does the pipeline auto-supply?** Three: `domainJoinPassword` and `localAdminPassword` (via `readEnvironmentVariable(...)`) and `artifactsLocation` (via `--parameters` override from the `upload-artifacts` job output). See [README → Parameters reference](../README.md#parameters-reference-mainbicepparam) for the full per-parameter source.
 
-A ready-to-use workflow is provided at [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It uses **OIDC federated credentials** (no client secrets stored in GitHub) and runs:
+A ready-to-use workflow is provided at [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It uses **OIDC federated credentials** (no client secrets stored in GitHub) and is **manual-trigger only** — it does not run on push or pull request:
 
 | Trigger | Jobs |
 | --- | --- |
-| Pull request to `main` | `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if` |
-| Push to `main` | `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `deploy` → `post-deploy-tests` |
-| Manual (`workflow_dispatch`) | choose `action` (what-if / deploy) **and** `prereqs_action` (use-existing / what-if / deploy-new). The `prereqs` job runs only when `prereqs_action != use-existing` — i.e. only on manual runs. |
+| `workflow_dispatch` → `action: what-if` | `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `what-if` |
+| `workflow_dispatch` → `action: deploy` | `lint` → `config-tests` → `package-dsc` → `upload-artifacts` → `pre-deploy-checks` → `deploy` → `post-deploy-tests` |
+| `workflow_dispatch` → `prereqs_action: what-if` / `deploy-new` | Adds a `prereqs` job up front. Default `use-existing` skips it. |
+
+Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI.
 
 The pipeline:
 
 1. **`lint`** — compiles `main.bicep`, `main.bicepparam`, `prereqs/main.bicep`, and `prereqs/main.bicepparam`.
 2. **`config-tests`** (no Azure) — runs [`actionlint`](https://github.com/rhysd/actionlint), [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2), [`tests/Test-DscConfiguration.ps1`](../tests/Test-DscConfiguration.ps1) (PSScriptAnalyzer + parse + Configuration discovery), and [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1) (no public-internet CIDRs, valid AD DNS IP, valid KV secret URI, hostnames ≤ 15 chars, etc.).
-3. **`prereqs`** *(manual `workflow_dispatch` only)* — runs `az deployment sub what-if`/`create` against [`prereqs/main.bicep`](../prereqs/main.bicep) when `prereqs_action != use-existing` — provisions a fresh Key Vault + DSC storage account. **Skipped on PR and push events.** See [Prerequisite resources](./prereq-resources.md).
+3. **`prereqs`** *(only when `prereqs_action != use-existing`)* — runs `az deployment sub what-if`/`create` against [`prereqs/main.bicep`](../prereqs/main.bicep) — provisions a fresh Key Vault + DSC storage account. See [Prerequisite resources](./prereq-resources.md).
 4. **`package-dsc`** — zips `dsc/Configuration.ps1` → `Configuration.zip`.
-5. **`upload-artifacts`** — runs [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) which uploads the zip to your artifacts storage account using **`--auth-mode login`** (no account keys) and mints a **user-delegation SAS** (2-hour expiry). Uses the storage account from the prereqs job if it just ran, otherwise the `ARTIFACTS_STORAGE_ACCOUNT` repo variable. The script's outputs (`artifacts_location` URL and `sas`) are piped to `$GITHUB_OUTPUT` with `::add-mask::` on the SAS so it never appears in logs. Subsequent jobs read both via `needs.upload-artifacts.outputs.*`.
-6. **`pre-deploy-checks`** (Azure read-only) — verifies the existing VNet/subnet exist and have enough free IPs for the requested `sessionHostCount`, that `AzureBastionSubnet` is present when `deployBastion=true`, that the Key Vault is RBAC-enabled and the cert is exportable + not about to expire (when `enableCertificateBinding=true`), that `Configuration.zip` is reachable via the SAS, and finally runs `az deployment group validate` (this catches RBAC/policy errors that `what-if` masks as `ResourceNotFound`).
-7. **`what-if`** (PRs / manual `what-if`) **or** **`deploy`** (push to `main` / manual `deploy`). On PRs, the what-if output is written to `whatif.txt`, appended to the run's job summary, and posted as a collapsible PR comment by `github-actions[bot]`. Re-runs on the same PR upsert the comment (the prior one is deleted, the new one is posted) so the conversation isn't spammed. Output longer than ~60 KB is truncated in the comment but kept in full in the job summary to stay under GitHub's 65 KB comment cap.
+5. **`upload-artifacts`** — runs [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) which uploads the zip to your artifacts storage account using **`--auth-mode login`** (no account keys, no SAS — tenant policy forbids both). Uses the storage account from the prereqs job if it just ran, otherwise the `ARTIFACTS_STORAGE_ACCOUNT` repo variable. The script's outputs (`artifacts_location` URL and `artifacts_storage_account`) are piped to `$GITHUB_OUTPUT`. Subsequent jobs read both via `needs.upload-artifacts.outputs.*`.
+6. **`pre-deploy-checks`** (Azure read-only) — verifies the existing VNet/subnet exist and have enough free IPs for the requested `sessionHostCount`, that `AzureBastionSubnet` is present when `deployBastion=true`, that the Key Vault is RBAC-enabled and the cert is exportable + not about to expire (when `enableCertificateBinding=true`), that `Configuration.zip` exists in the artifacts container (checked with `az storage blob exists --auth-mode login`, no SAS), and finally runs `az deployment group validate` (this catches RBAC/policy errors that `what-if` masks as `ResourceNotFound`).
+7. **`what-if`** (when `action: what-if`) **or** **`deploy`** (when `action: deploy`). The what-if output is written to `whatif.txt` and appended to the run's job summary so the resource diff is one click away from the Actions tab.
 8. **`post-deploy-tests`** (after `deploy` succeeds) — runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1): every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, DNS resolution, RD Web URL HTTPS 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`, which is expected for production allow-lists and does not fail the job).
 9. Posts the gateway FQDN, RD Web URL, and test result to the GitHub Actions job summary.
 
@@ -39,16 +41,17 @@ The pipeline's service principal (created by Tier 0) holds these roles. The firs
 | Target resource group (`rds-farm-rg`) | `Contributor` | Deploy VMs, LB, NSG, etc. | Inherited from sub |
 | Existing VNet RG | `Network Contributor` | Read existing VNet/subnet, attach NSG. | Inherited from sub |
 | Existing Key Vault (if cert binding) | `Key Vault Reader` + `Role Based Access Control Administrator` | [`modules/kv-role.bicep`](../modules/kv-role.bicep) creates a role assignment, which needs `Microsoft.Authorization/roleAssignments/write`. | Inherited from sub |
-| Artifacts storage account | `Storage Blob Data Contributor` | Upload `Configuration.zip` and mint a user-delegation SAS. | Inherited from sub |
+| Artifacts storage account | `Storage Blob Data Contributor` | Upload `Configuration.zip` from CI (the `--auth-mode login` flag uses the SP's Entra token, no account keys, no SAS). The VMs themselves use a separate UAMI with `Storage Blob Data Reader` (granted by [`modules/sa-role.bicep`](../modules/sa-role.bicep)) to read the blob back at apply-time. | Inherited from sub |
 
 > If your tenant won't allow sub-scope `Contributor` for a CI principal, comment out **Step 3** in [`scripts/Initialize-CiPrerequisites.ps1`](../scripts/Initialize-CiPrerequisites.ps1), have a human run the prereqs deploy from their laptop ([Option 2 in `prereq-resources.md`](./prereq-resources.md#option-2--manual-az-deployment-sub-create)), and then grant the four narrower scopes above by hand. The workflow's `prereqs_action: deploy-new` choice will no longer work — leave it at `use-existing` forever.
 
 **Why a service principal and not your own user?** GitHub Actions can't log in interactively as a human (no browser, no MFA). OIDC federated credentials only attach to app registrations. Tier 0 runs *as you* (your Owner user signs in via `az login`) and creates a separate SP that the workflow uses thereafter. Two identities, two purposes.
 
-## Notes on the SAS approach
+## Notes on blob authentication
 
-- The workflow uses `az storage blob generate-sas --auth-mode login --as-user`, which produces a **user-delegation SAS** signed with the service principal's Entra ID token. No storage account keys are ever required.
-- SAS lifetime is 2 hours — enough for the DSC extension to download `Configuration.zip` during provisioning, but short enough that a leaked log line won't be exploitable for long. The SAS is also masked with `::add-mask::`.
+- The artifacts storage account is provisioned with `allowSharedKeyAccess: false` and `defaultToOAuthAuthentication: true` (see [`prereqs/modules/storage.bicep`](../prereqs/modules/storage.bicep)). The tenant Azure Policy in use here also forbids any SAS, including user-delegation SAS — so all blob I/O must use OAuth.
+- **CI uploads** use `az storage blob upload --auth-mode login`: the GitHub Actions OIDC token logs in the workflow's service principal, which holds `Storage Blob Data Contributor` on the SA.
+- **VMs download** `Configuration.zip` via the DSC extension's `protectedSettings.managedIdentity = { clientId }` (DSC v2.83+). The Bicep grants the VMs' user-assigned managed identity `Storage Blob Data Reader` on the SA via [`modules/sa-role.bicep`](../modules/sa-role.bicep). No SAS or shared key ever leaves the storage account.
 - Bicep parameters set via `--parameters key=value` override values from `main.bicepparam`. The pipeline uses this to inject `artifactsLocation` so the file can stay environment-neutral in source control.
 
 ## Standalone CI bootstrap (advanced)

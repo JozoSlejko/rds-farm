@@ -8,14 +8,15 @@
 
       1. Read passwords interactively (Read-Host -AsSecureString) unless
          already present in the environment.
-      2. Call scripts/Publish-DscArtifact.ps1 to zip + upload + mint SAS.
-      3. Set DOMAIN_JOIN_PASSWORD / LOCAL_ADMIN_PASSWORD / ARTIFACTS_SAS
-         in the process environment (so bicepparam's readEnvironmentVariable
-         calls resolve).
+      2. Call scripts/Publish-DscArtifact.ps1 to zip + upload Configuration.zip.
+         The DSC extension reads it back at apply-time using the VM's user-
+         assigned managed identity (Storage Blob Data Reader on the SA).
+      3. Set DOMAIN_JOIN_PASSWORD / LOCAL_ADMIN_PASSWORD in the process
+         environment (so bicepparam's readEnvironmentVariable calls resolve).
       4. Ensure the target resource group exists.
       5. Run tests/Test-PreDeployReadiness.ps1 (same checks the pipeline's
-         `pre-deploy-checks` job runs - VNet/subnet sizing, KV+cert, SAS
-         reachability, az deployment group validate). Skip with
+         `pre-deploy-checks` job runs - VNet/subnet sizing, KV+cert, blob
+         reachability via MSI auth, az deployment group validate). Skip with
          -SkipReadinessCheck.
       6. Run 'az deployment group what-if' (always) and, if -Action deploy,
          then 'az deployment group create'.
@@ -48,8 +49,8 @@
     -StorageAccount is omitted.
 
 .PARAMETER SkipPublish
-    Reuse existing $env:ARTIFACTS_LOCATION + $env:ARTIFACTS_SAS instead of
-    re-uploading. Useful when iterating on Bicep without touching DSC.
+    Reuse the existing $env:ARTIFACTS_LOCATION instead of re-uploading.
+    Useful when iterating on Bicep without touching DSC.
 
 .PARAMETER SkipWhatIf
     Go straight to deploy without running what-if first. Use sparingly.
@@ -57,8 +58,9 @@
 .PARAMETER SkipReadinessCheck
     Skip the tests/Test-PreDeployReadiness.ps1 gate that runs the same checks
     the pipeline's `pre-deploy-checks` job runs (VNet/subnet sizing, Key Vault
-    + cert sanity, SAS reachability, `az deployment group validate`). Skip only
-    when you have a known-bad config you're explicitly trying to deploy.
+    + cert sanity, blob reachability via MSI auth, `az deployment group
+    validate`). Skip only when you have a known-bad config you're explicitly
+    trying to deploy.
 
 .EXAMPLE
     # Preview a manual deployment
@@ -169,10 +171,10 @@ Read-SecretIfMissing -EnvVar 'LOCAL_ADMIN_PASSWORD' -Prompt 'LOCAL_ADMIN_PASSWOR
 Write-Host ""
 Write-Host "==> Step 2: Publish DSC artifact" -ForegroundColor Green
 if ($SkipPublish) {
-    if (-not $env:ARTIFACTS_LOCATION -or -not $env:ARTIFACTS_SAS) {
-        throw "-SkipPublish set but `$env:ARTIFACTS_LOCATION / `$env:ARTIFACTS_SAS not present."
+    if (-not $env:ARTIFACTS_LOCATION) {
+        throw "-SkipPublish set but `$env:ARTIFACTS_LOCATION not present."
     }
-    Write-Host "    -SkipPublish: reusing existing env vars."
+    Write-Host "    -SkipPublish: reusing existing ARTIFACTS_LOCATION."
 } else {
     $publishArgs = @{ SetEnvVars = $true }
     if ($StorageAccount) { $publishArgs.StorageAccount = $StorageAccount }

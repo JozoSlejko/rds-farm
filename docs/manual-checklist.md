@@ -63,10 +63,10 @@ After it finishes:
 
 ### Pipeline (supported path)
 
-- [ ] **Push to a branch + open a PR to `main`.** The `what-if` job runs and posts a comment with the planned resource changes.
-- [ ] **Review the what-if diff,** then merge to `main`. The `deploy` job runs (gated by the `production` environment) followed by `post-deploy-tests`.
+- [ ] **Run the workflow manually** \u2014 `Actions \u2192 Deploy RDS Farm \u2192 Run workflow` with `action: what-if`. Review the resource diff in the run's job summary.
+- [ ] **Re-run with `action: deploy`** once you're happy with the plan. The `deploy` job runs (gated by the `production` environment) followed by `post-deploy-tests`.
 - [ ] **Inspect the workflow job summary** for `gatewayFqdn` and `rdWebUrl`. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1) automatically.
-- [ ] **Optional `workflow_dispatch` toggle.** `prereqs_action: what-if` re-validates [`prereqs/main.bicep`](../prereqs/main.bicep); `prereqs_action: deploy-new` re-applies it (useful if you've changed `prereqs/`).
+- [ ] **Optional `prereqs_action` toggle.** `what-if` re-validates [`prereqs/main.bicep`](../prereqs/main.bicep); `deploy-new` re-applies it (useful if you've changed `prereqs/`). Default `use-existing` skips that job entirely.
 
 Full reference: [CI/CD with GitHub Actions](./ci-cd.md).
 
@@ -76,7 +76,7 @@ Full reference: [CI/CD with GitHub Actions](./ci-cd.md).
 - [ ] **Preview:** `./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount <sa>`
 - [ ] **Apply:** `./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount <sa>`
 
-The wrapper packages DSC, uploads, mints a 2-hour user-delegation SAS, prompts for `DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` if missing, and runs `what-if` + `create`. Equivalent broken-down `az` commands: [Manual deploy (escape hatch)](./manual-deploy.md).
+The wrapper packages DSC, uploads it via `--auth-mode login`, prompts for `DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` if missing, and runs `what-if` + `create`. The DSC extension reads the blob back at apply-time with the VMs' user-assigned managed identity (no SAS — tenant policy forbids it). Equivalent broken-down `az` commands: [Manual deploy (escape hatch)](./manual-deploy.md).
 
 ---
 

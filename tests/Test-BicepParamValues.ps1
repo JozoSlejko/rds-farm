@@ -58,9 +58,6 @@ foreach ($v in 'DOMAIN_JOIN_PASSWORD', 'LOCAL_ADMIN_PASSWORD') {
         [Environment]::SetEnvironmentVariable($v, 'placeholder-for-validation-only')
     }
 }
-if ($null -eq [Environment]::GetEnvironmentVariable('ARTIFACTS_SAS')) {
-    [Environment]::SetEnvironmentVariable('ARTIFACTS_SAS', '')
-}
 
 # 1. Compile bicepparam → ARM parameter JSON
 $tmp = New-TemporaryFile

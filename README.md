@@ -190,7 +190,8 @@ The values below are baked into [`main.bicepparam`](main.bicepparam) during Tier
 | `deployBastion` | no (`true`) | file | Set `false` if you already have Bastion in a hub VNet. |
 | `availabilityZones` | no (`['1','2','3']`) | file | Reduce if the region has fewer zones. |
 | `artifactsLocation` | yes | **CI override** (file for laptop) | Base URL of the blob container holding `Configuration.zip`. Must end with `/`. Pipeline's `upload-artifacts` job sets this from the SA the `prereqs` job created. |
-| `artifactsLocationSasToken` | when artifacts container is private | **env var** | `$env:ARTIFACTS_SAS`. Pipeline mints a user-delegation SAS via [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) and exports it as a masked job output. |
+| `artifactsStorageAccountName` | yes | file | Storage account hosting `Configuration.zip`. The Bicep grants the VMs' UAMI **Storage Blob Data Reader** on this SA so the DSC extension can OAuth-download the blob (no SAS — tenant policy blocks both shared keys and SAS). |
+| `artifactsStorageAccountResourceGroup` | yes | file | Resource group of `artifactsStorageAccountName`. |
 | `sessionHostNamingPrefix` | no (`rds-sh-`) | file | Must match what the broker DSC uses to compute FQDNs. |
 | `collectionName` | no | file | RDS session collection name. |
 | `rdsAccessGroup` | no (`Domain Users`) | file | sAMAccountName of the AD security group whose members can sign in to the collection and through the RD Gateway. |
@@ -212,9 +213,11 @@ git push
 
 | Trigger | What runs |
 | --- | --- |
-| PR to `main` | `lint → config-tests → upload-artifacts → pre-deploy-checks → what-if`. The what-if diff is posted as a (collapsible) PR comment by `github-actions[bot]` and also written to the run's job summary. |
-| Merge to `main` | All of the above plus `deploy` (gated by the `production` environment) and `post-deploy-tests`. |
-| `workflow_dispatch` | Same plus the `prereqs_action` toggle (`use-existing` / `what-if` / `deploy-new`) — useful if you want CI to re-validate the prereqs deployment Tier 0 already did, or to redeploy them after editing [`prereqs/main.bicep`](prereqs/main.bicep). |
+| `workflow_dispatch → action: what-if` | `lint → config-tests → upload-artifacts → pre-deploy-checks → what-if`. The what-if diff is written to the run's job summary. |
+| `workflow_dispatch → action: deploy` | All of the above plus `deploy` (gated by the `production` environment) and `post-deploy-tests`. |
+| `workflow_dispatch → prereqs_action: what-if` / `deploy-new` | Adds a `prereqs` job before the rest — re-validates or redeploys [`prereqs/main.bicep`](prereqs/main.bicep) (Key Vault + DSC storage account). Default `use-existing` skips it. |
+
+> The pipeline is **manual-trigger only** — it does not run on commit, push, or pull request. Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI.
 
 Typical wall-clock time on `Standard_D4s_v5`: **25–40 min**. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](tests/Test-PostDeployHealth.ps1) and confirms every VM extension succeeded, LB backend is healthy, DNS resolves, and `https://<gatewayFqdn>/RDWeb/` returns 200. Full CI/CD reference: [`docs/ci-cd.md`](docs/ci-cd.md). What the deploy actually does to the VMs (Bicep + DSC, 12 steps): [`docs/manual-deploy.md`](docs/manual-deploy.md#what-the-deployment-does-end-to-end). Test details: [`docs/testing.md`](docs/testing.md).
 
@@ -297,7 +300,7 @@ rds-farm/
 ├── scripts/                    # bootstrap + helper scripts
 │   ├── Initialize-RdsFarm.ps1          # Tier-0 ORCHESTRATOR — calls the four below in order
 │   ├── Initialize-CiPrerequisites.ps1  # Tier-0: Entra app + federated creds + RBAC + GitHub secrets
-│   ├── Publish-DscArtifact.ps1         # zip + upload Configuration.zip + mint user-delegation SAS
+│   ├── Publish-DscArtifact.ps1         # zip + upload Configuration.zip (--auth-mode login, no SAS)
 │   ├── Invoke-ManualDeploy.ps1         # Tier-1 laptop escape hatch (no CI required)
 │   ├── New-RdsCertificate.ps1          # create/import TLS cert in Key Vault (CSR/PFX/SelfSigned)
 │   ├── Set-BicepParamCertUri.ps1       # patch cert-related params in main.bicepparam in place

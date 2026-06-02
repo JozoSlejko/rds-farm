@@ -168,9 +168,6 @@ if (Get-Command az -ErrorAction SilentlyContinue) {
             [Environment]::SetEnvironmentVariable($v, 'placeholder-for-validation-only', 'Process')
         }
     }
-    if ($null -eq [Environment]::GetEnvironmentVariable('ARTIFACTS_SAS')) {
-        [Environment]::SetEnvironmentVariable('ARTIFACTS_SAS', '', 'Process')
-    }
 
     $tmp = New-TemporaryFile
     try {

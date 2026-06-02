@@ -68,9 +68,11 @@ param availabilityZones array = ['1', '2', '3']
 @description('Base URL of the storage container holding Configuration.zip (no trailing file name).')
 param artifactsLocation string
 
-@secure()
-@description('SAS token (including leading "?") for artifactsLocation. Leave empty if container is public or uses MSI auth.')
-param artifactsLocationSasToken string = ''
+@description('Name of the artifacts storage account (used by the identity module to grant Storage Blob Data Reader on the SA so the DSC extension can pull the blob with managed-identity auth).')
+param artifactsStorageAccountName string
+
+@description('Resource group of the artifacts storage account.')
+param artifactsStorageAccountResourceGroup string
 
 @description('Naming prefix for session host VMs (must match what the broker DSC will look up).')
 param sessionHostNamingPrefix string = 'rds-sh-'
@@ -138,18 +140,22 @@ module bastion 'modules/bastion.bicep' = if (deployBastion) {
   }
 }
 
-module identity 'modules/identity.bicep' = if (enableCertificateBinding) {
+module identity 'modules/identity.bicep' = {
   params: {
     namePrefix: namePrefix
     location: location
+    tags: tags
+    artifactsStorageAccountName: artifactsStorageAccountName
+    artifactsStorageAccountResourceGroup: artifactsStorageAccountResourceGroup
+    enableKeyVaultRole: enableCertificateBinding
     keyVaultName: keyVaultName
     keyVaultResourceGroup: keyVaultResourceGroup
-    tags: tags
   }
 }
 
-var identityIdForVms = enableCertificateBinding ? identity!.outputs.identityId : ''
-var identityClientIdForVms = enableCertificateBinding ? identity!.outputs.identityClientId : ''
+// Every VM gets the UAMI (used at minimum for blob auth in the DSC extension).
+var identityIdForVms       = identity.outputs.identityId
+var identityClientIdForVms = identity.outputs.identityClientId
 
 // Public hostname users type and the cert validates against. Falls back to the
 // Azure-managed LB FQDN for lab/self-signed deployments.
@@ -222,6 +228,8 @@ module sessionHosts 'modules/vm.bicep' = [for i in range(0, sessionHostCount): {
     adDomainName: adDomainName
     zone: availabilityZones[i % length(availabilityZones)]
     tags: tags
+    userAssignedIdentityId: identityIdForVms
+    userAssignedIdentityClientId: identityClientIdForVms
   }
 }]
 
@@ -241,7 +249,7 @@ module gatewayDsc 'modules/dsc.bicep' = {
       }
     }
     artifactsLocation: artifactsLocation
-    artifactsLocationSasToken: artifactsLocationSasToken
+    userAssignedIdentityClientId: identityClientIdForVms
   }
 }
 
@@ -253,7 +261,7 @@ module sessionHostDsc 'modules/dsc.bicep' = [for i in range(0, sessionHostCount)
     configurationFunction: 'Configuration.ps1\\SessionHost'
     configurationProperties: {}
     artifactsLocation: artifactsLocation
-    artifactsLocationSasToken: artifactsLocationSasToken
+    userAssignedIdentityClientId: identityClientIdForVms
   }
 }]
 
@@ -284,7 +292,7 @@ module brokerDsc 'modules/dsc.bicep' = {
       }
     }
     artifactsLocation: artifactsLocation
-    artifactsLocationSasToken: artifactsLocationSasToken
+    userAssignedIdentityClientId: identityClientIdForVms
   }
 }
 

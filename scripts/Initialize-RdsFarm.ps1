@@ -1178,17 +1178,19 @@ $content = Get-Content -LiteralPath $BicepParamFile -Raw
 $origLen = $content.Length
 
 $stringPatches = [ordered]@{
-    existingVnetName          = $ExistingVnetName
-    existingVnetResourceGroup = $ExistingVnetResourceGroup
-    existingRdsSubnetName     = $ExistingRdsSubnetName
-    adDomainName              = $AdDomainName
-    adDnsServerIp             = $AdDnsServerIp
-    domainJoinUserName        = $DomainJoinUserName
-    domainJoinOuPath          = $DomainJoinOuPath
-    localAdminUserName        = $LocalAdminUserName
-    gatewayDnsLabelPrefix     = $GatewayDnsLabelPrefix
-    rdsAccessGroup            = $RdsAccessGroup
-    artifactsLocation         = $artifactsLocationUrl
+    existingVnetName                       = $ExistingVnetName
+    existingVnetResourceGroup              = $ExistingVnetResourceGroup
+    existingRdsSubnetName                  = $ExistingRdsSubnetName
+    adDomainName                           = $AdDomainName
+    adDnsServerIp                          = $AdDnsServerIp
+    domainJoinUserName                     = $DomainJoinUserName
+    domainJoinOuPath                       = $DomainJoinOuPath
+    localAdminUserName                     = $LocalAdminUserName
+    gatewayDnsLabelPrefix                  = $GatewayDnsLabelPrefix
+    rdsAccessGroup                         = $RdsAccessGroup
+    artifactsLocation                      = $artifactsLocationUrl
+    artifactsStorageAccountName            = $ArtifactsStorageAccount
+    artifactsStorageAccountResourceGroup   = $ArtifactsResourceGroup
 }
 
 foreach ($name in $stringPatches.Keys) {
@@ -1206,9 +1208,6 @@ foreach ($v in 'DOMAIN_JOIN_PASSWORD','LOCAL_ADMIN_PASSWORD') {
     if (-not [Environment]::GetEnvironmentVariable($v)) {
         [Environment]::SetEnvironmentVariable($v, 'placeholder-for-validation-only', 'Process')
     }
-}
-if ($null -eq [Environment]::GetEnvironmentVariable('ARTIFACTS_SAS')) {
-    [Environment]::SetEnvironmentVariable('ARTIFACTS_SAS', '', 'Process')
 }
 $tmp = New-TemporaryFile
 try {

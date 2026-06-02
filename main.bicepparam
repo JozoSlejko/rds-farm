@@ -39,8 +39,12 @@ param gatewayDnsLabelPrefix = 'rds-j-slejco'
 param deployBastion = true
 
 // DSC artifacts
+// The VMs' user-assigned managed identity is granted Storage Blob Data Reader
+// on this account so the DSC extension can OAuth-download Configuration.zip
+// (the SA has allowSharedKeyAccess=false; SAS is blocked by tenant policy).
 param artifactsLocation = 'https://rdsjslejcosa01.blob.core.windows.net/dsc/'
-param artifactsLocationSasToken = readEnvironmentVariable('ARTIFACTS_SAS', '')
+param artifactsStorageAccountName = 'rdsjslejcosa01'
+param artifactsStorageAccountResourceGroup = 'rds-artifacts-rg'
 param sessionHostNamingPrefix = 'rds-sh-'
 param collectionName = 'DesktopCollection'
 
