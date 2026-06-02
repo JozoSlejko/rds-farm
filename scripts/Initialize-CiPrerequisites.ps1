@@ -117,8 +117,18 @@ function Set-GhSecret {
         [string]$Repo
     )
     Write-Host "  Setting secret '$Name'..."
-    # Pipe via stdin so the value never appears on the command line / process list.
-    $Value | gh secret set $Name --repo $Repo --body -
+    # Pass the value via --body, NOT via stdin. Reason: the previous
+    # implementation used '$Value | gh secret set $Name --body -' which
+    # actually sets the literal string '-' as the secret (--body wins; the
+    # piped value is ignored). The naive fix ('$Value | gh secret set $Name')
+    # works but PowerShell on Windows appends a trailing CRLF to piped
+    # strings, which would silently land inside the stored secret and break
+    # downstream uses (e.g. azure/login@v3 would see 'tenantid\r\n' and fail
+    # with AADSTS90002 'Tenant not found'). --body is the most predictable
+    # path. The value briefly appears on the gh.exe command line, which is
+    # only visible to processes owned by the same user — acceptable on a
+    # developer workstation that is itself doing the bootstrap.
+    gh secret set $Name --repo $Repo --body $Value
     if ($LASTEXITCODE -ne 0) { throw "Failed to set GitHub secret '$Name'." }
 }
 
