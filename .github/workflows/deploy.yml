@@ -390,10 +390,18 @@ jobs:
     name: What-If
     runs-on: ubuntu-latest
     needs: [upload-artifacts, pre-deploy-checks]
-    # Default-safe: anything that isn't an explicit 'deploy' falls through
-    # to what-if. Guards against an empty `inputs.action` on re-runs (which
-    # can otherwise silently skip both this job AND `deploy`).
-    if: github.event_name == 'workflow_dispatch' && inputs.action != 'deploy'
+    # Use always() to opt out of GitHub's implicit success() — which walks
+    # transitively and would treat the intentionally-skipped `prereqs`
+    # ancestor (via upload-artifacts.needs) as failure, silently skipping
+    # this job. Then explicitly require our two direct needs to have
+    # succeeded. Default-safe: anything that isn't an explicit 'deploy'
+    # falls through to what-if (guards against empty inputs on re-runs).
+    if: |
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && inputs.action != 'deploy'
+      && needs.upload-artifacts.result == 'success'
+      && needs.pre-deploy-checks.result == 'success'
     environment: preview
     steps:
       - uses: actions/checkout@v4
@@ -442,7 +450,15 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     needs: [upload-artifacts, pre-deploy-checks]
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+    # always() opts out of GitHub's implicit success() (which would treat
+    # the intentionally-skipped `prereqs` ancestor as failure). We then
+    # require both direct needs to have succeeded.
+    if: |
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && inputs.action == 'deploy'
+      && needs.upload-artifacts.result == 'success'
+      && needs.pre-deploy-checks.result == 'success'
     environment: production
     steps:
       - uses: actions/checkout@v4
