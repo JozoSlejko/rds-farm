@@ -79,7 +79,14 @@ param(
 
     [string]$ArtifactsStorageAccount,
 
-    [switch]$RequireProductionApproval
+    [switch]$RequireProductionApproval,
+
+    # Skip the read-only self-check at the end (Test-CiPrerequisites.ps1).
+    # The orchestrator (Initialize-RdsFarm.ps1) sets this because the
+    # storage account the self-check verifies doesn't exist yet at this
+    # point in the orchestrator's flow; Test-RdsFarmInit.ps1 runs the
+    # full check at the end instead.
+    [switch]$SkipSelfCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -323,6 +330,11 @@ Write-Host "  6. Trigger the workflow with action: deploy."
 # ---------------------------------------------------------------------------
 # 7. Self-check (read-only)
 # ---------------------------------------------------------------------------
+if ($SkipSelfCheck) {
+    Write-Host ""
+    Write-Host "(Self-check skipped — caller passed -SkipSelfCheck.)" -ForegroundColor DarkGray
+    exit 0
+}
 $selfCheck = Join-Path $PSScriptRoot '..\tests\Test-CiPrerequisites.ps1'
 if (Test-Path -LiteralPath $selfCheck) {
     Write-Host ""
@@ -345,3 +357,10 @@ if (Test-Path -LiteralPath $selfCheck) {
     Write-Host ""
     Write-Host "(Self-check skipped — tests/Test-CiPrerequisites.ps1 not found.)" -ForegroundColor DarkGray
 }
+
+# Make the exit code explicit. Without this, $LASTEXITCODE leaks through
+# from whatever native command (gh / az) ran last — e.g. a 'gh variable get'
+# that returned 1 because the variable didn't exist (a non-fatal case the
+# self-check handled as a soft-warn) would still register as exit 1 here
+# and trip the orchestrator's '$LASTEXITCODE -ne 0' guard.
+exit 0

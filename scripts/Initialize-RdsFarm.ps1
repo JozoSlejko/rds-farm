@@ -989,10 +989,17 @@ if (-not $SkipCiBootstrap) {
     $ciArgs = @{
         GitHubRepo     = $GitHubRepo
         AppDisplayName = $AppDisplayName
+        # Skip the inner self-check: the storage account it verifies doesn't
+        # exist yet (Step 4 creates it). Test-RdsFarmInit.ps1 at the end
+        # checks everything once everything actually exists.
+        SkipSelfCheck  = $true
     }
-    if ($SubscriptionId) { $ciArgs['SubscriptionId'] = $SubscriptionId }
-    # Do NOT pass -ArtifactsStorageAccount here; we'll set it ourselves in step 7
-    # so the variable always reflects what the prereqs deployment actually produced.
+    if ($SubscriptionId)          { $ciArgs['SubscriptionId']          = $SubscriptionId }
+    # Pass the SA name through so the GH repo variable is set in this step
+    # instead of leaving the self-check to warn that it's missing.
+    # Step 7 below still calls 'gh variable set' to keep things idempotent
+    # (and to update the value if the prereqs deploy renames the SA).
+    if ($ArtifactsStorageAccount) { $ciArgs['ArtifactsStorageAccount'] = $ArtifactsStorageAccount }
     if ($RequireProductionApproval) { $ciArgs['RequireProductionApproval'] = $true }
 
     & $initCi @ciArgs
@@ -1029,22 +1036,39 @@ if (-not $SkipPrereqsDeploy) {
         @{ id = $myObjectId;   type = 'User'             }
         @{ id = $ciSpObjectId; type = 'ServicePrincipal' }
     )
-    # Pass the array as a JSON literal via --parameters key=value (CLI accepts it as JSON).
-    $adminPrincipalsJson = ($adminPrincipals | ConvertTo-Json -Compress -Depth 5)
+    # We can't pass adminPrincipals inline as 'name=<json>' because PowerShell
+    # mangles embedded double quotes when handing argv to az.cmd, producing
+    # '[{id:..,type:User}...]' which the CLI then fails to parse as JSON.
+    # Workaround: write a tiny ARM parameters file containing just that one
+    # parameter and pass it with --parameters @file. Primitive parameters
+    # still ride along as inline 'name=value' pairs (CLI merges the two).
+    $paramFile = New-TemporaryFile
+    try {
+        $armParams = @{
+            '$schema'       = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+            contentVersion = '1.0.0.0'
+            parameters     = @{
+                adminPrincipals = @{ value = $adminPrincipals }
+            }
+        }
+        ($armParams | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $paramFile -Encoding utf8
 
-    $deployName = "rds-prereqs-$(Get-Date -Format yyyyMMdd-HHmmss)"
-    az deployment sub create `
-        --name              $deployName `
-        --location          $Location `
-        --template-file     $prereqs `
-        --parameters        location=$Location `
-                            storageResourceGroupName=$ArtifactsResourceGroup `
-                            keyVaultResourceGroupName=$KeyVaultResourceGroup `
-                            storageAccountName=$ArtifactsStorageAccount `
-                            keyVaultName=$KeyVaultName `
-                            "adminPrincipals=$adminPrincipalsJson" `
-        --output            none
-    if ($LASTEXITCODE -ne 0) { throw "Prereqs deployment failed." }
+        $deployName = "rds-prereqs-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        az deployment sub create `
+            --name              $deployName `
+            --location          $Location `
+            --template-file     $prereqs `
+            --parameters        "@$($paramFile.FullName)" `
+                                location=$Location `
+                                storageResourceGroupName=$ArtifactsResourceGroup `
+                                keyVaultResourceGroupName=$KeyVaultResourceGroup `
+                                storageAccountName=$ArtifactsStorageAccount `
+                                keyVaultName=$KeyVaultName `
+            --output            none
+        if ($LASTEXITCODE -ne 0) { throw "Prereqs deployment failed." }
+    } finally {
+        Remove-Item -LiteralPath $paramFile.FullName -Force -ErrorAction SilentlyContinue
+    }
 
     # Read the storage account name back from outputs (lets caller mistype safely).
     $outSa = az deployment sub show --name $deployName --query 'properties.outputs.storageAccountName.value' -o tsv

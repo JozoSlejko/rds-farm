@@ -168,7 +168,7 @@ if ($LASTEXITCODE -ne 0 -or -not $secretsJson) {
 # ---------------------------------------------------------------------------
 $saName = (gh variable get ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $saName) {
-    Write-TestResult "Variable 'ARTIFACTS_STORAGE_ACCOUNT' is set" $false `
+    Write-TestResult "Variable 'ARTIFACTS_STORAGE_ACCOUNT' is NOT set" $false `
         "Set it with: gh variable set ARTIFACTS_STORAGE_ACCOUNT --repo $GitHubRepo --body <name>" -SoftWarn
 } else {
     $saName = $saName.Trim()
