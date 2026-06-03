@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Static-analysis and parse tests for the DSC configuration script.
 

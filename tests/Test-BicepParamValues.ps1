@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Sanity-check values in main.bicepparam before any deployment runs.
 

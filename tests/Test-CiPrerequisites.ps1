@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Verify the CI prerequisites set up by Initialize-CiPrerequisites.ps1.
 

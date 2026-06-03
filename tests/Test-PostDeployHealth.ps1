@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Post-deployment smoke tests for the RDS farm.
 
