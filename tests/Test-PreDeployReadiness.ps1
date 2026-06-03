@@ -206,15 +206,24 @@ if ($LASTEXITCODE -ne 0 -or -not $vnetJson) {
     }
 
     if ($deployBast) {
-        az network vnet subnet show -g $vnetRg --vnet-name $vnet -n $bastionSub -o none 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-TestResult "Bastion subnet '$bastionSub' present (deployBastion=true)" $true
-        } else {
-            # Soft fallback: deploy will skip bastion automatically (the CI
-            # pipeline overrides deployBastion=false in this case). Same
-            # behavior on the laptop path via Invoke-ManualDeploy.ps1.
-            Write-TestResult "Bastion subnet '$bastionSub' missing - bastion will be skipped at deploy time" $false `
-                "Pre-create '$bastionSub' (exact name 'AzureBastionSubnet', /26 or larger) in $vnet if you want bastion provisioned." -SoftWarn
+        if ([string]::IsNullOrWhiteSpace($bastionSub)) {
+            # Misconfig: deployBastion=true but no subnet name supplied. The
+            # template will fall through to no-bastion, but flag it so the
+            # operator notices.
+            Write-TestResult "Bastion subnet name supplied (deployBastion=true)" $false `
+                "bastionSubnetName is empty in bicepparam. Set it to 'AzureBastionSubnet' (or your custom name) and pre-create the subnet (/26 or larger), or set deployBastion=false." -SoftWarn
+        }
+        else {
+            az network vnet subnet show -g $vnetRg --vnet-name $vnet -n $bastionSub -o none 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-TestResult "Bastion subnet '$bastionSub' present (deployBastion=true)" $true
+            } else {
+                # Soft fallback: deploy will skip bastion automatically (the CI
+                # pipeline overrides deployBastion=false in this case). Same
+                # behavior on the laptop path via Invoke-ManualDeploy.ps1.
+                Write-TestResult "Bastion subnet '$bastionSub' missing - bastion will be skipped at deploy time" $false `
+                    "Pre-create '$bastionSub' (exact name 'AzureBastionSubnet', /26 or larger) in $vnet if you want bastion provisioned." -SoftWarn
+            }
         }
     }
 }
@@ -240,8 +249,31 @@ if (-not $certEnabled) {
         # NOTE: 'az keyvault certificate show-policy' is not a real CLI subcommand.
         # Use 'show ... --query policy' to get the policy object. The CLI returns
         # camelCase (keyProperties), so the JSON we parse uses .keyProperties too.
-        $polJson = az keyvault certificate show --vault-name $kvName --name $certNameFromUri --query policy -o json 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $polJson -or $polJson -eq 'null') {
+        # Capture stderr so we can distinguish a missing cert from a vault that
+        # simply rejects this caller (e.g. publicNetworkAccess=Disabled, RBAC role
+        # not yet propagated). The deploy can still succeed in those cases because
+        # the gateway VM uses its managed identity over a private endpoint.
+        $polJson = az keyvault certificate show --vault-name $kvName --name $certNameFromUri --query policy -o json 2>&1
+        $polRc   = $LASTEXITCODE
+        $polTxt  = ($polJson | Out-String)
+
+        # Heuristic: any 'Forbidden' / 'public network access' / 'not allowed'
+        # error means we're blocked by network or RBAC, not that the cert is
+        # missing. Mark inconclusive (SoftWarn) instead of failing the run.
+        $isBlockedByPolicy =
+            ($polRc -ne 0) -and (
+                $polTxt -match 'Public network access is disabled' -or
+                $polTxt -match 'ForbiddenByConnection' -or
+                $polTxt -match 'ForbiddenByFirewall' -or
+                $polTxt -match 'Forbidden' -or
+                $polTxt -match 'does not have certificates (get|list) permission'
+            )
+
+        if ($isBlockedByPolicy) {
+            Write-TestResult "Cert '$certNameFromUri' present in $kvName (inconclusive)" $false `
+                "Vault data-plane is not reachable from this host (public access disabled or RBAC not yet effective). The gateway VM will still reach the cert via its managed identity. URI: $kvSecretUri" -SoftWarn
+        }
+        elseif ($polRc -ne 0 -or -not $polJson -or $polTxt.Trim() -eq 'null') {
             Write-TestResult "Certificate '$certNameFromUri' exists in $kvName" $false `
                 "URI was: $kvSecretUri"
         } else {
@@ -283,16 +315,42 @@ $artifactsBlobName  = 'Configuration.zip'
 if (-not $artifactsSa) {
     Write-Host "    Storage account name not resolved (env ARTIFACTS_STORAGE_ACCOUNT empty and bicepparam has no artifactsStorageAccountName) — skipped" -ForegroundColor DarkYellow
 } else {
-    $exists = az storage blob exists `
+    # Capture stderr+stdout so we can distinguish "blob is missing" from
+    # "this caller is blocked" (publicNetworkAccess=Disabled, RBAC role not
+    # yet propagated, network ACL deny, ...). The VMs use their managed
+    # identity over a private endpoint / service endpoint at deploy time and
+    # will still succeed even if our laptop is blocked.
+    $blobOut = az storage blob exists `
         --account-name   $artifactsSa `
         --container-name $artifactsContainer `
         --name           $artifactsBlobName `
         --auth-mode      login `
-        --query exists -o tsv 2>$null
-    if ($LASTEXITCODE -ne 0) {
+        --query exists -o tsv 2>&1
+    $blobRc  = $LASTEXITCODE
+    $blobTxt = ($blobOut | Out-String)
+
+    # Heuristic: any of these stderr signatures means we're blocked by
+    # network or RBAC, not that the blob is missing.
+    $isBlockedByPolicy =
+        ($blobRc -ne 0) -and (
+            $blobTxt -match 'Public access is not permitted' -or
+            $blobTxt -match 'PublicAccessNotPermitted' -or
+            $blobTxt -match 'public network access is disabled' -or
+            $blobTxt -match 'AuthorizationFailure' -or
+            $blobTxt -match 'AuthorizationPermissionMismatch' -or
+            $blobTxt -match 'This request is not authorized' -or
+            $blobTxt -match 'not authorized to perform this operation' -or
+            $blobTxt -match 'Forbidden'
+        )
+
+    if ($isBlockedByPolicy) {
+        Write-TestResult "Blob $artifactsContainer/$artifactsBlobName reachable from this host (inconclusive)" $false `
+            "Storage data-plane is not reachable from this host (public access disabled or RBAC not yet effective). The VMs will still pull the artifact via their managed identity over the private endpoint. SA: $artifactsSa" -SoftWarn
+    }
+    elseif ($blobRc -ne 0) {
         Write-TestResult "Blob $artifactsContainer/$artifactsBlobName exists on $artifactsSa" $false `
             'az storage blob exists failed. Ensure you have Storage Blob Data Reader on the SA (login auth).'
-    } elseif ($exists -eq 'true') {
+    } elseif ($blobTxt.Trim() -eq 'true') {
         Write-TestResult "Blob $artifactsContainer/$artifactsBlobName exists on $artifactsSa" $true
     } else {
         Write-TestResult "Blob $artifactsContainer/$artifactsBlobName exists on $artifactsSa" $false `

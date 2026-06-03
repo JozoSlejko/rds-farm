@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location":                  { "value": "italynorth" },
+    "storageResourceGroupName":  { "value": "rds-artifacts-rg" },
+    "keyVaultResourceGroupName": { "value": "rds-security-rg" },
+    "storageAccountName":        { "value": "rdsjslejcosa01" },
+    "keyVaultName":              { "value": "rdsjslejcokv01" },
+    "deployKeyVault":            { "value": true },
+    "keyVaultEnablePurgeProtection": { "value": true },
+
+    "peSubnetId": {
+      "value": "/subscriptions/244f0f4d-69d9-41af-9b08-d83d0553aead/resourceGroups/rg-j-rdsvnet-01/providers/Microsoft.Network/virtualNetworks/j-rdsvnet-01/subnets/pe"
+    },
+
+    "dnsZoneVnetLinks": {
+      "value": [
+        "/subscriptions/244f0f4d-69d9-41af-9b08-d83d0553aead/resourceGroups/rg-j-rdsvnet-01/providers/Microsoft.Network/virtualNetworks/j-rdsvnet-01",
+        "/subscriptions/244f0f4d-69d9-41af-9b08-d83d0553aead/resourceGroups/rg-j-hubvnet-01/providers/Microsoft.Network/virtualNetworks/j-hubvnet-01"
+      ]
+    },
+
+    "useExistingKvZone":        { "value": true },
+    "existingKvZoneResourceId": {
+      "value": "/subscriptions/244f0f4d-69d9-41af-9b08-d83d0553aead/resourceGroups/rg-j-dns-01/providers/Microsoft.Network/privateDnsZones/privatelink.vaultcore.azure.net"
+    },
+    "existingKvZoneAdditionalVnetLinks": {
+      "value": [
+        "/subscriptions/244f0f4d-69d9-41af-9b08-d83d0553aead/resourceGroups/rg-j-rdsvnet-01/providers/Microsoft.Network/virtualNetworks/j-rdsvnet-01"
+      ]
+    },
+
+    "adminPrincipals": {
+      "value": [
+        { "id": "79c004c6-ee6a-46c9-97f5-b67e0663f123", "type": "User" },
+        { "id": "8467f07c-4a64-4e04-91ea-931416df3f89", "type": "ServicePrincipal" }
+      ]
+    }
+  }
+}

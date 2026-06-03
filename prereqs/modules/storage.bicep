@@ -30,11 +30,10 @@ resource sa 'Microsoft.Storage/storageAccounts@2024-01-01' = {
     defaultToOAuthAuthentication: true
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
-    publicNetworkAccess: 'Enabled'
-    networkAcls: {
-      defaultAction: 'Allow'
-      bypass: 'AzureServices'
-    }
+    // Public network access is disabled by Azure Policy on this subscription.
+    // Data-plane reach happens via the Private Endpoint created in
+    // prereqs/main.bicep, which lands in the spoke 'pe' subnet.
+    publicNetworkAccess: 'Disabled'
   }
 }
 

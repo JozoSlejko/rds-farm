@@ -241,6 +241,28 @@ param(
     [string]$KeyVaultResourceGroup  = 'rds-security-rg',
     [string]$FarmResourceGroup      = 'rds-farm-rg',
 
+    # Prereqs — Private Endpoint + DNS plumbing.
+    # The KV and SA both deploy with publicNetworkAccess=Disabled (subscription
+    # policy enforces this). Reachability for the farm VMs depends on PEs in
+    # the spoke 'pe' subnet, plus privatelink.* zones linked to the right VNets.
+    #
+    # PeSubnetId    : full resource ID of an already-existing subnet (with
+    #                 privateEndpointNetworkPolicies=Disabled) where the PEs go.
+    # DnsZoneVnetLinks : full VNet resource IDs that should resolve the BLOB
+    #                 privatelink zone. At minimum the spoke VNet; add the hub
+    #                 if uploads / cert mgmt happen from a hub jump box.
+    # UseExistingKvZone / ExistingKvZoneResourceId / ExistingKvZoneAdditionalVnetLinks :
+    #                 set when a central privatelink.vaultcore.azure.net zone
+    #                 already exists (e.g. one your platform team manages and
+    #                 the hub is linked to). The template will skip creating
+    #                 its own vault zone, point the KV PE's zone group at the
+    #                 existing zone, and add the listed VNet links to it.
+    [string]$PeSubnetId,
+    [string[]]$DnsZoneVnetLinks,
+    [switch]$UseExistingKvZone,
+    [string]$ExistingKvZoneResourceId,
+    [string[]]$ExistingKvZoneAdditionalVnetLinks,
+
     # TLS cert
     [ValidateSet('Csr','ImportPfx','SelfSigned')]
     [string]$CertMode,
@@ -1092,20 +1114,44 @@ if (-not $SkipPrereqsDeploy) {
         @{ id = $myObjectId;   type = 'User'             }
         @{ id = $ciSpObjectId; type = 'ServicePrincipal' }
     )
+
+    # Validate the PE / DNS inputs up front so the failure shows here, not 4
+    # minutes into the deploy. PeSubnetId and DnsZoneVnetLinks are mandatory
+    # because publicNetworkAccess is enforced off; without a PE the farm VMs
+    # cannot reach KV or the SA.
+    if ([string]::IsNullOrWhiteSpace($PeSubnetId)) {
+        throw "PeSubnetId is required. Pre-create a /28 'pe' subnet in the spoke VNet (privateEndpointNetworkPolicies=Disabled) and pass its full resource ID."
+    }
+    if (-not $DnsZoneVnetLinks -or $DnsZoneVnetLinks.Count -eq 0) {
+        throw "DnsZoneVnetLinks is required (at minimum the spoke VNet that owns PeSubnetId). Pass an array of full VNet resource IDs."
+    }
+    if ($UseExistingKvZone -and [string]::IsNullOrWhiteSpace($ExistingKvZoneResourceId)) {
+        throw "UseExistingKvZone was specified but ExistingKvZoneResourceId is empty. Provide the full resource ID of the existing privatelink.vaultcore.azure.net zone (e.g. .../rg-j-dns-01/providers/Microsoft.Network/privateDnsZones/privatelink.vaultcore.azure.net)."
+    }
+
     # We can't pass adminPrincipals inline as 'name=<json>' because PowerShell
     # mangles embedded double quotes when handing argv to az.cmd, producing
     # '[{id:..,type:User}...]' which the CLI then fails to parse as JSON.
-    # Workaround: write a tiny ARM parameters file containing just that one
-    # parameter and pass it with --parameters @file. Primitive parameters
-    # still ride along as inline 'name=value' pairs (CLI merges the two).
+    # Same applies to dnsZoneVnetLinks and existingKvZoneAdditionalVnetLinks
+    # (string arrays with quoting). Workaround: write a single ARM parameters
+    # file that carries every value the deploy needs and pass it with
+    # --parameters @file.
     $paramFile = New-TemporaryFile
     try {
+        $armParamValues = @{
+            adminPrincipals  = @{ value = $adminPrincipals }
+            peSubnetId       = @{ value = $PeSubnetId }
+            dnsZoneVnetLinks = @{ value = $DnsZoneVnetLinks }
+            useExistingKvZone = @{ value = [bool]$UseExistingKvZone }
+            existingKvZoneResourceId = @{ value = ($ExistingKvZoneResourceId ?? '') }
+            existingKvZoneAdditionalVnetLinks = @{
+                value = (@($ExistingKvZoneAdditionalVnetLinks) | Where-Object { $_ })
+            }
+        }
         $armParams = @{
             '$schema'       = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
             contentVersion = '1.0.0.0'
-            parameters     = @{
-                adminPrincipals = @{ value = $adminPrincipals }
-            }
+            parameters     = $armParamValues
         }
         ($armParams | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $paramFile -Encoding utf8
 

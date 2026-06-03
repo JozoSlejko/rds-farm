@@ -37,11 +37,11 @@ resource kv 'Microsoft.KeyVault/vaults@2024-04-01-preview' = {
     enabledForDeployment: false
     enabledForDiskEncryption: false
     enabledForTemplateDeployment: false
-    publicNetworkAccess: 'Enabled'
-    networkAcls: {
-      defaultAction: 'Allow'
-      bypass: 'AzureServices'
-    }
+    // Public network access is disabled by Azure Policy on this subscription.
+    // Setting it here too keeps the bicep declarative and avoids drift detection
+    // noise. Data-plane access happens via the Private Endpoint created in
+    // prereqs/main.bicep, which lands in the spoke 'pe' subnet.
+    publicNetworkAccess: 'Disabled'
   }
 }
 
