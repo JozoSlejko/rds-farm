@@ -241,6 +241,8 @@ module gatewayDsc 'modules/dsc.bicep' = {
     configurationProperties: {
       DomainName: adDomainName
       RDUserGroup: rdsAccessGroup
+      CertificateSubject: certificateSubject
+      DomainJoinUserName: domainJoinUserName
     }
     protectedItems: {
       AdminCreds: {
@@ -259,7 +261,10 @@ module sessionHostDsc 'modules/dsc.bicep' = [for i in range(0, sessionHostCount)
     vmName: sessionHosts[i].outputs.vmName
     location: location
     configurationFunction: 'Configuration.ps1\\SessionHost'
-    configurationProperties: {}
+    configurationProperties: {
+      DomainName: adDomainName
+      DomainJoinUserName: domainJoinUserName
+    }
     artifactsLocation: artifactsLocation
     userAssignedIdentityClientId: identityClientIdForVms
   }
@@ -284,6 +289,7 @@ module brokerDsc 'modules/dsc.bicep' = {
       CollectionName: collectionName
       CertificateSubject: certificateSubject
       RDUserGroup: rdsAccessGroup
+      DomainJoinUserName: domainJoinUserName
     }
     protectedItems: {
       AdminCreds: {
