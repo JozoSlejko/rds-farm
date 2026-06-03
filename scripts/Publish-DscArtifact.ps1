@@ -134,6 +134,49 @@ $ctx = az account show -o json 2>$null | ConvertFrom-Json
 if (-not $ctx) { throw "Not logged in to Azure. Run 'az login' first." }
 Write-Host "    Subscription : $($ctx.name)"
 
+# Pre-flight DNS check. The SA runs with publicNetworkAccess=Disabled
+# (subscription policy enforces it), so the upload only succeeds from a
+# host that resolves the SA FQDN to its Private Endpoint IP (typically
+# anything inside the spoke / hub VNet, or a peered network). A laptop on
+# the public internet will resolve to a public IP and get HTTP 403
+# 'PublicAccessNotPermitted'. Catch this BEFORE the upload so we can give a
+# clear message instead of a generic RBAC complaint.
+$saHost = "$StorageAccount.blob.core.windows.net"
+try {
+    $resolved = Resolve-DnsName -Name $saHost -Type A -ErrorAction Stop
+} catch {
+    Write-Warning "DNS lookup for $saHost failed: $($_.Exception.Message). Continuing anyway — az may still succeed."
+    $resolved = $null
+}
+# Pull every IPv4 the chain resolves to (CNAMEs + A records). Use a generic
+# Test-PrivateIp because the actual PE subnet ranges aren't known to this
+# script (the prereqs deploy chooses them).
+function Test-PrivateIp {
+    param([string]$Ip)
+    if (-not $Ip) { return $false }
+    # RFC 1918 (10/8, 172.16/12, 192.168/16) + CGNAT (100.64/10, used by
+    # some Azure landing-zone designs).
+    return $Ip -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'
+}
+$ipv4s = @(
+    $resolved |
+        Where-Object {
+            # Only the Answer section — the Authority/Additional sections often
+            # carry root-nameserver glue records when the OS resolver went
+            # recursive, and we don't want those false positives in the
+            # warning. Also require an actual IPv4 (A record, not AAAA / NS).
+            $_.PSObject.Properties.Name -contains 'Section'    -and $_.Section -eq 'Answer' -and
+            $_.PSObject.Properties.Name -contains 'IP4Address' -and $_.IP4Address
+        } |
+        ForEach-Object { $_.IP4Address }
+)
+$privateHits = @($ipv4s | Where-Object { Test-PrivateIp $_ })
+if ($ipv4s -and -not $privateHits) {
+    Write-Warning "$saHost resolves to PUBLIC IP(s) [$($ipv4s -join ', ')]. The SA almost certainly has publicNetworkAccess=Disabled, so this upload will return HTTP 403. Run this script from inside the VNet (a hub jump box / DC, a spoke VM, or via Bastion to one) instead of your laptop."
+} elseif ($privateHits) {
+    Write-Host "    DNS : $saHost -> $($privateHits -join ', ') (private — PE path)"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Package
 # ---------------------------------------------------------------------------
@@ -155,32 +198,95 @@ Write-Host "    Wrote $zipPath ($zipBytes bytes)"
 Write-Host ""
 Write-Host "==> Step 2: Upload to blob storage" -ForegroundColor Green
 
-az storage blob upload `
-    --account-name   $StorageAccount `
-    --container-name $Container `
-    --name           $BlobName `
-    --file           $zipPath `
-    --overwrite `
-    --auth-mode      login | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Blob upload failed. Make sure you have 'Storage Blob Data Contributor' on $StorageAccount."
+# Small helper so both upload calls share the same stderr capture + error
+# classification. az's exit code is the only signal you get with --output
+# none, and a 403 (PNA blocking the data plane) looks identical to a 403
+# (missing RBAC) at exit-code level — only the stderr text disambiguates.
+function Invoke-AzBlobUpload {
+    param(
+        [Parameter(Mandatory)] [string]$BlobLabel,
+        [Parameter(Mandatory)] [string]$LocalFile,
+        [Parameter(Mandatory)] [string]$DestBlobName
+    )
+    # Capture stderr by redirecting it to stdout, then split out on exit.
+    $stderrLines = @()
+    & az storage blob upload `
+        --account-name   $StorageAccount `
+        --container-name $Container `
+        --name           $DestBlobName `
+        --file           $LocalFile `
+        --overwrite `
+        --auth-mode      login 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $stderrLines += $_.ToString()
+            }
+            # swallow stdout (would have been suppressed by | Out-Null before)
+        }
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "    Uploaded $BlobLabel."
+        return
+    }
+
+    $stderr = ($stderrLines -join "`n")
+    # Network-level (PE not reachable from this host, DNS pointing at public IP
+    # that PNA blocks). az surfaces 403 / PublicAccessNotPermitted /
+    # 'public network access is disabled' / sometimes 'AuthorizationFailure'
+    # / generic ConnectionError for TLS or routing failures to the PE IP.
+    $networkPatterns = @(
+        'PublicAccessNotPermitted'
+        'Public access is not permitted'
+        'public network access is disabled'
+        # The CLI's own re-wording when an upload hits the SA's network ACL
+        # (which, with PNA=Disabled and no firewall rules, blocks everything
+        # off the PE):
+        'blocked by network rules of storage account'
+        'ConnectionError'
+        'Failed to establish a new connection'
+        'getaddrinfo failed'
+        'No connection could be made'
+        'A connection attempt failed'
+    )
+    foreach ($pattern in $networkPatterns) {
+        if ($stderr -match $pattern) {
+            throw @"
+$BlobLabel upload to $StorageAccount/$Container failed because this host cannot reach the storage account's data plane.
+
+The SA runs with publicNetworkAccess=Disabled, so it is reachable ONLY through its Private Endpoint. Symptoms suggest this host (probably your laptop) is resolving the SA FQDN to its PUBLIC IP and hitting the firewall.
+
+Fix: run this script from a host inside the spoke / hub VNet (or peered to it). The DC at the hub is the usual choice — RDP via Bastion, install az CLI, clone the repo, re-run.
+
+Verify on the target host:
+  Resolve-DnsName $StorageAccount.blob.core.windows.net   # should return 172.16.x.x (or your PE subnet)
+
+Underlying az error:
+$stderr
+"@
+        }
+    }
+
+    # RBAC / auth issues.
+    $authPatterns = @(
+        'AuthorizationPermissionMismatch'
+        'AuthorizationFailure'
+        'not authorized to perform this operation'
+        'does not have authorization to perform action'
+    )
+    foreach ($pattern in $authPatterns) {
+        if ($stderr -match $pattern) {
+            throw "$BlobLabel upload failed: the signed-in identity is missing 'Storage Blob Data Contributor' on $StorageAccount. Grant it (or have your CI principal grant it) and retry.`n`nUnderlying az error:`n$stderr"
+        }
+    }
+
+    # Anything else — surface the raw stderr so the user can act on it.
+    throw "$BlobLabel upload failed (az exit $LASTEXITCODE).`n`n$stderr"
 }
-Write-Host "    Uploaded $BlobName."
+
+Invoke-AzBlobUpload -BlobLabel $BlobName       -LocalFile $zipPath      -DestBlobName $BlobName
 
 # Bootstrap.ps1 is downloaded by CSE alongside Configuration.zip into the same
 # Downloads\<seq> directory. The blob name must stay as 'Bootstrap.ps1' to
 # match the fileUris baked into modules/dsc.bicep.
-az storage blob upload `
-    --account-name   $StorageAccount `
-    --container-name $Container `
-    --name           'Bootstrap.ps1' `
-    --file           $BootstrapPath `
-    --overwrite `
-    --auth-mode      login | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Bootstrap.ps1 upload failed. Make sure you have 'Storage Blob Data Contributor' on $StorageAccount."
-}
-Write-Host "    Uploaded Bootstrap.ps1."
+Invoke-AzBlobUpload -BlobLabel 'Bootstrap.ps1' -LocalFile $BootstrapPath -DestBlobName 'Bootstrap.ps1'
 
 $artifactsLocation = "https://$StorageAccount.blob.core.windows.net/$Container/"
 $blobUrl           = "$artifactsLocation$BlobName"
