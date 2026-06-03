@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Create/update the vanity CNAME for the RDS gateway in Azure DNS.
 

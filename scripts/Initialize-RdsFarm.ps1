@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Single-command Tier-0 bootstrap for the RDS farm.
 

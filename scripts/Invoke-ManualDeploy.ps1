@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     End-to-end manual deployment wrapper for the RDS farm (no CI required).
 

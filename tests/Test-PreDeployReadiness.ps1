@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Local equivalent of the workflow's `pre-deploy-checks` job.
 

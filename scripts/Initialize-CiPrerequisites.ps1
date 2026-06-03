@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Tier-0 bootstrap for the rds-farm GitHub Actions pipeline.
 

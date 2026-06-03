@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CSE bootstrap that compiles + applies one of the DSC configurations
     defined in Configuration.ps1.

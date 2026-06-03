@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Patch the cert-binding params in main.bicepparam in place.
 

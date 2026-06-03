@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Tear down the RDS farm resource group (and optionally prereqs RGs).
 

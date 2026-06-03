@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Package dsc/Configuration.ps1 + dsc/Bootstrap.ps1 and upload them to the
     artifacts storage account.
@@ -158,18 +158,20 @@ function Test-PrivateIp {
     # some Azure landing-zone designs).
     return $Ip -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'
 }
-$ipv4s = @(
-    $resolved |
-        Where-Object {
-            # Only the Answer section — the Authority/Additional sections often
-            # carry root-nameserver glue records when the OS resolver went
-            # recursive, and we don't want those false positives in the
-            # warning. Also require an actual IPv4 (A record, not AAAA / NS).
-            $_.PSObject.Properties.Name -contains 'Section'    -and $_.Section -eq 'Answer' -and
-            $_.PSObject.Properties.Name -contains 'IP4Address' -and $_.IP4Address
-        } |
-        ForEach-Object { $_.IP4Address }
-)
+$ipv4s = @()
+if ($resolved) {
+    # Only the Answer section — the Authority/Additional sections sometimes
+    # carry root-nameserver glue records when the OS resolver went recursive,
+    # and we don't want those false positives in the warning. Also require an
+    # actual IPv4 (A record, not AAAA / NS / SOA).
+    foreach ($r in $resolved) {
+        $hasSection = $r.PSObject.Properties.Name -contains 'Section'
+        $hasIp      = $r.PSObject.Properties.Name -contains 'IP4Address'
+        if ($hasSection -and $r.Section -eq 'Answer' -and $hasIp -and $r.IP4Address) {
+            $ipv4s += $r.IP4Address
+        }
+    }
+}
 $privateHits = @($ipv4s | Where-Object { Test-PrivateIp $_ })
 if ($ipv4s -and -not $privateHits) {
     Write-Warning "$saHost resolves to PUBLIC IP(s) [$($ipv4s -join ', ')]. The SA almost certainly has publicNetworkAccess=Disabled, so this upload will return HTTP 403. Run this script from inside the VNet (a hub jump box / DC, a spoke VM, or via Bastion to one) instead of your laptop."

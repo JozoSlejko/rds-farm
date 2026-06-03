@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Create or import the TLS certificate for the RDS gateway in Key Vault.
 

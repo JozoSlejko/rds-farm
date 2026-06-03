@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Verify everything Initialize-RdsFarm.ps1 set up (one command, single PASS/FAIL).
 
