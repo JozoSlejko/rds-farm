@@ -51,7 +51,7 @@
 .PARAMETER Location
     Optional. Azure region the workflow will deploy the farm RG into. When set,
     written to GitHub as the AZURE_LOCATION repo variable. If omitted, the
-    workflow falls back to its hard-coded default ('westeurope').
+    workflow falls back to whatever literal is in deploy.yml's env: block.
 
 .PARAMETER FarmResourceGroup
     Optional. Name of the resource group the workflow creates and deploys
@@ -325,7 +325,7 @@ if ($ArtifactsStorageAccount) {
 if ($Location) {
     Set-GhVariable -Name 'AZURE_LOCATION' -Value $Location -Repo $GitHubRepo
 } else {
-    Write-Host "  -Location not provided; workflow will use its default ('westeurope')." -ForegroundColor Yellow
+    Write-Host "  -Location not provided; workflow will use the AZURE_LOCATION repo variable fallback in deploy.yml." -ForegroundColor Yellow
 }
 
 if ($FarmResourceGroup) {

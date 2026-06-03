@@ -47,8 +47,10 @@
     Target farm RG. Default 'rds-farm-rg'. Forwarded to Test-PreDeployReadiness.ps1.
 
 .PARAMETER Location
-    Region used by Test-PreDeployReadiness.ps1 for its implicit `az group create`
-    when running `az deployment group validate`. Default 'westeurope'.
+    Region forwarded to Test-PreDeployReadiness.ps1 for its implicit
+    `az group create` when the target RG doesn't yet exist. Empty by
+    default - reuse the existing RG's region (auto-detected) or pass
+    explicitly when bootstrapping a fresh deployment.
 
 .PARAMETER BicepParamFile
     Path to main.bicepparam. Default <repo>/main.bicepparam.
@@ -89,7 +91,7 @@ param(
     [string]$SubscriptionId,
 
     [string]$ResourceGroup  = 'rds-farm-rg',
-    [string]$Location       = 'westeurope',
+    [string]$Location       = '',
 
     [string]$BicepParamFile = (Join-Path $PSScriptRoot '..' 'main.bicepparam'),
     [string]$BicepFile      = (Join-Path $PSScriptRoot '..' 'main.bicep'),
@@ -162,7 +164,7 @@ Write-Host ''
 Write-Host 'Verifying Tier 0 (Initialize-RdsFarm.ps1) output' -ForegroundColor Green
 Write-Host ("  GitHub repo     : {0}" -f $GitHubRepo)
 Write-Host ("  App display     : {0}" -f $AppDisplayName)
-Write-Host ("  Target RG       : {0} ({1})" -f $ResourceGroup, $Location)
+Write-Host ('  Target RG       : {0}{1}' -f $ResourceGroup, $(if ($Location) { " ($Location)" } else { '' }))
 Write-Host ("  Bicepparam      : {0}" -f $BicepParamFile)
 if ($SkipCi)        { Write-Host '  [skip] CI prerequisites check' -ForegroundColor DarkYellow }
 if ($SkipPreDeploy) { Write-Host '  [skip] Pre-deploy readiness check' -ForegroundColor DarkYellow }
@@ -194,10 +196,10 @@ $results.Add( (Invoke-Section -Name 'Bicepparam values' -ScriptPath $paramScript
 if (-not $SkipPreDeploy) {
     $preArgs = @{
         ResourceGroup  = $ResourceGroup
-        Location       = $Location
         BicepFile      = $BicepFile
         BicepParamFile = $BicepParamFile
     }
+    if ($Location)          { $preArgs['Location']          = $Location }
     if ($SkipBicepValidate) { $preArgs['SkipBicepValidate'] = $true }
 
     $results.Add( (Invoke-Section -Name 'Pre-deploy readiness' -ScriptPath $preDeployScript -Arguments $preArgs) ) | Out-Null

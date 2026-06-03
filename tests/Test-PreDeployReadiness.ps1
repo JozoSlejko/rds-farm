@@ -35,7 +35,11 @@
     Target RG for `az deployment group validate`. Default: 'rds-farm-rg'.
 
 .PARAMETER Location
-    Azure region for `az group create`. Default: 'westeurope'.
+.PARAMETER Location
+    Azure region used only when the RG doesn't yet exist (validate needs an
+    RG to target). If the RG already exists, the script auto-discovers its
+    location and ignores this parameter. Falls back to $env:AZURE_LOCATION
+    on fresh deployments.
 
 .PARAMETER BicepFile
     Default: <repo>/main.bicep.
@@ -61,7 +65,7 @@
 [CmdletBinding()]
 param(
     [string]$ResourceGroup  = 'rds-farm-rg',
-    [string]$Location       = 'westeurope',
+    [string]$Location       = '',
     [string]$BicepFile      = (Join-Path $PSScriptRoot '..' 'main.bicep'),
     [string]$BicepParamFile = (Join-Path $PSScriptRoot '..' 'main.bicepparam'),
     [switch]$SkipBicepValidate
@@ -169,15 +173,35 @@ if ($LASTEXITCODE -ne 0 -or -not $vnetJson) {
         Write-TestResult "Subnet '$subnet' present in $vnet" $false
     } else {
         $sub  = $subJson | ConvertFrom-Json
-        $cidr = if ($sub.addressPrefix) { $sub.addressPrefix } else { $sub.addressPrefixes[0] }
-        $pfx  = [int](($cidr -split '/')[1])
-        # Azure reserves 5 IPs per subnet.
-        $avail = ([math]::Pow(2, 32 - $pfx) - 5)
-        $needed = 2 + $shCount   # gateway + broker + N session hosts
-        if ($avail -lt $needed) {
-            Write-TestResult "Subnet '$subnet' ($cidr) has $avail usable IPs (need $needed)" $false
+        # Two reasons we have to PSObject-probe instead of $sub.addressPrefix:
+        # (1) Set-StrictMode -Version Latest is on, so touching a missing
+        #     property is a terminating error, not $null.
+        # (2) Azure returns *either* 'addressPrefix' (single, classic) *or*
+        #     'addressPrefixes' (array, dual-stack / multi-CIDR subnets).
+        #     Subnets created post-2023 via portal often only have the array.
+        $names = $sub.PSObject.Properties.Name
+        $cidr  =
+            if (($names -contains 'addressPrefix') -and $sub.addressPrefix) {
+                $sub.addressPrefix
+            }
+            elseif (($names -contains 'addressPrefixes') -and $sub.addressPrefixes) {
+                $sub.addressPrefixes[0]
+            }
+            else { $null }
+
+        if (-not $cidr) {
+            Write-TestResult "Subnet '$subnet' has an addressPrefix" $false `
+                "Neither addressPrefix nor addressPrefixes is set on $vnet/$subnet. Check the subnet exists and isn't delegated to a managed service that hides the CIDR."
         } else {
-            Write-TestResult "Subnet '$subnet' ($cidr) has $avail usable IPs (need $needed)" $true
+            $pfx    = [int](($cidr -split '/')[1])
+            # Azure reserves 5 IPs per subnet.
+            $avail  = ([math]::Pow(2, 32 - $pfx) - 5)
+            $needed = 2 + $shCount   # gateway + broker + N session hosts
+            if ($avail -lt $needed) {
+                Write-TestResult "Subnet '$subnet' ($cidr) has $avail usable IPs (need $needed)" $false
+            } else {
+                Write-TestResult "Subnet '$subnet' ($cidr) has $avail usable IPs (need $needed)" $true
+            }
         }
     }
 
@@ -286,10 +310,15 @@ if ($SkipBicepValidate) {
 } else {
     $rgExists = (az group exists -n $ResourceGroup) -eq 'true'
     if (-not $rgExists) {
-        Write-Host "    Creating RG $ResourceGroup in $Location (validate needs an RG to target)..."
-        az group create -n $ResourceGroup -l $Location -o none
-        if ($LASTEXITCODE -ne 0) {
-            Write-TestResult "Ensure RG $ResourceGroup" $false 'Need Contributor on the subscription / RG to create.'
+        if (-not $Location -and $env:AZURE_LOCATION) { $Location = $env:AZURE_LOCATION }
+        if (-not $Location) {
+            Write-TestResult "Ensure RG $ResourceGroup" $false "RG doesn't exist and no -Location / `$env:AZURE_LOCATION supplied to create it."
+        } else {
+            Write-Host "    Creating RG $ResourceGroup in $Location (validate needs an RG to target)..."
+            az group create -n $ResourceGroup -l $Location -o none
+            if ($LASTEXITCODE -ne 0) {
+                Write-TestResult "Ensure RG $ResourceGroup" $false 'Need Contributor on the subscription / RG to create.'
+            }
         }
     }
 

@@ -36,7 +36,11 @@
     Target resource group. Default: 'rds-farm-rg'.
 
 .PARAMETER Location
-    Azure region for `az group create`. Default: 'westeurope'.
+    Azure region to use when CREATING the resource group. If the RG already
+    exists the script auto-discovers its location and reuses it (RG location
+    is immutable in Azure). When omitted on a fresh deployment, the script
+    falls back to $env:AZURE_LOCATION; if neither is set it errors out
+    instead of guessing.
 
 .PARAMETER BicepFile
     Path to the main Bicep template. Default: <repo>/main.bicep.
@@ -88,7 +92,7 @@ param(
 
     [string]$StorageAccount,
     [string]$ResourceGroup = 'rds-farm-rg',
-    [string]$Location      = 'westeurope',
+    [string]$Location      = '',
 
     [string]$BicepFile      = (Join-Path $PSScriptRoot '..' 'main.bicep'),
     [string]$BicepParamFile = (Join-Path $PSScriptRoot '..' 'main.bicepparam'),
@@ -155,7 +159,7 @@ $ctx = az account show -o json 2>$null | ConvertFrom-Json
 if (-not $ctx) { throw "Not logged in to Azure. Run 'az login' first." }
 Write-Host "    Subscription : $($ctx.name) ($($ctx.id))"
 Write-Host "    Action       : $Action"
-Write-Host "    Resource grp : $ResourceGroup (in $Location)"
+Write-Host "    Resource grp : $ResourceGroup$( if ($Location) { " (target region: $Location)" })"
 
 # ---------------------------------------------------------------------------
 # 1. Secrets
@@ -189,8 +193,34 @@ Write-Host "    ArtifactsLocation = $env:ARTIFACTS_LOCATION"
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==> Step 3: Ensure resource group" -ForegroundColor Green
-az group create -n $ResourceGroup -l $Location -o none
-if ($LASTEXITCODE -ne 0) { throw "Failed to create/ensure RG $ResourceGroup." }
+
+# RG location is immutable in Azure. Don't try to "create" an existing RG in a
+# different region (az group create with -l != existing.location fails with
+# InvalidResourceGroupLocation). Instead: if it exists, adopt its location; if
+# it doesn't, demand -Location (or $env:AZURE_LOCATION) and create.
+$rgExists = (az group exists -n $ResourceGroup) -eq 'true'
+if ($rgExists) {
+    $rgInfo = az group show -n $ResourceGroup -o json | ConvertFrom-Json
+    $discoveredLocation = $rgInfo.location
+    if ($Location -and ($Location -ne $discoveredLocation)) {
+        throw "RG '$ResourceGroup' already exists in '$discoveredLocation' but -Location is '$Location'. " +
+              "RG location is immutable. Drop -Location to reuse the existing region, or use a different RG."
+    }
+    $Location = $discoveredLocation
+    Write-Host "    RG $ResourceGroup already exists in '$Location' - reusing."
+} else {
+    if (-not $Location -and $env:AZURE_LOCATION) {
+        $Location = $env:AZURE_LOCATION
+        Write-Host "    Using `$env:AZURE_LOCATION = '$Location' for new RG."
+    }
+    if (-not $Location) {
+        throw "Resource group '$ResourceGroup' does not exist and no -Location was supplied. " +
+              "Pass -Location <region> (e.g. -Location italynorth) or set `$env:AZURE_LOCATION."
+    }
+    Write-Host "    Creating RG $ResourceGroup in '$Location'..."
+    az group create -n $ResourceGroup -l $Location -o none
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create RG $ResourceGroup." }
+}
 Write-Host "    OK"
 
 # ---------------------------------------------------------------------------

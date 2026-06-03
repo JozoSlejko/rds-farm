@@ -54,7 +54,10 @@
 
 .PARAMETER Location
     Azure region for the prereq RGs / KV / SA and the farm deployment.
-    Default: 'westeurope'.
+    No default - pass `-Location <region>` (e.g. `-Location italynorth`) or
+    set `$env:AZURE_LOCATION`. In `-Interactive` mode you'll be prompted
+    for it instead. Bound here at param-time so the value flows into the
+    bicepparam, the prereqs deploy, and the CI repo variable.
 
 .PARAMETER AdDomainName
     The AD domain to join (e.g. 'contoso.local'). Required.
@@ -211,7 +214,7 @@ param(
 
     # Azure scope
     [string]$SubscriptionId,
-    [string]$Location = 'westeurope',
+    [string]$Location = '',
 
     # AD
     [string]$AdDomainName,
@@ -263,6 +266,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Hardcoded region defaults are a footgun: they silently land prereq RGs (KV,
+# SA) in the wrong region, where you then can't move them. Require explicit
+# intent. -Interactive mode prompts for it later; everyone else gets the
+# env-var fallback or a clear error before any az call.
+if (-not $Location -and $env:AZURE_LOCATION) { $Location = $env:AZURE_LOCATION }
+if (-not $Location -and -not $Interactive) {
+    throw "No -Location provided and `$env:AZURE_LOCATION not set. " +
+          "Pass -Location <region> (e.g. -Location italynorth) or run with -Interactive."
+}
 
 # ---------------------------------------------------------------------------
 # Helpers

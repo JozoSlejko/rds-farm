@@ -1,5 +1,8 @@
 using 'main.bicep'
 
+// Region for the artifacts SA + Key Vault RGs. Tier 0
+// (scripts/Initialize-RdsFarm.ps1) overwrites this with your chosen
+// -Location before invoking `az deployment group create`.
 param location = 'westeurope'
 
 // Resource groups that this template will create (or update if they exist).
