@@ -106,13 +106,12 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
         sku: windowsSku
         version: 'latest'
       }
+      // Disk SKU updates must be done on Microsoft.Compute/disks directly;
+      // sending osDisk.managedDisk.storageAccountType in VM PUT can fail on redeploy.
       osDisk: {
         name: '${vmName}-osdisk'
         caching: 'ReadWrite'
         createOption: 'FromImage'
-        managedDisk: {
-          storageAccountType: 'Premium_LRS'
-        }
       }
     }
     networkProfile: {
