@@ -111,6 +111,7 @@ var tags = {
 }
 
 module network 'modules/network.bicep' = {
+  name: 'network-core'
   scope: resourceGroup(existingVnetResourceGroup)
   params: {
     vnetName: existingVnetName
@@ -123,6 +124,7 @@ module network 'modules/network.bicep' = {
 }
 
 module loadbalancer 'modules/loadbalancer.bicep' = {
+  name: 'loadbalancer-core'
   params: {
     namePrefix: namePrefix
     location: location
@@ -133,6 +135,7 @@ module loadbalancer 'modules/loadbalancer.bicep' = {
 }
 
 module bastion 'modules/bastion.bicep' = if (deployBastion) {
+  name: 'bastion-core'
   params: {
     namePrefix: namePrefix
     location: location
@@ -144,6 +147,7 @@ module bastion 'modules/bastion.bicep' = if (deployBastion) {
 }
 
 module identity 'modules/identity.bicep' = {
+  name: 'identity-core'
   params: {
     namePrefix: namePrefix
     location: location
@@ -165,6 +169,7 @@ var identityClientIdForVms = identity.outputs.identityClientId
 var effectiveGatewayFqdn = empty(publicGatewayFqdn) ? loadbalancer.outputs.gatewayFqdn : publicGatewayFqdn
 
 module gatewayVm 'modules/vm.bicep' = {
+  name: 'vm-gateway-01'
   params: {
     vmName: '${namePrefix}-gw-01'
     location: location
@@ -190,6 +195,7 @@ module gatewayVm 'modules/vm.bicep' = {
 }
 
 module brokerVm 'modules/vm.bicep' = {
+  name: 'vm-broker-01'
   params: {
     vmName: '${namePrefix}-cb-01'
     location: location
@@ -237,6 +243,7 @@ module sessionHosts 'modules/vm.bicep' = [for i in range(0, sessionHostCount): {
 }]
 
 module gatewayDsc 'modules/dsc.bicep' = {
+  name: 'dsc-gateway-01'
   params: {
     vmName: gatewayVm.outputs.vmName
     location: location
@@ -276,6 +283,7 @@ module sessionHostDsc 'modules/dsc.bicep' = [for i in range(0, sessionHostCount)
 }]
 
 module brokerDsc 'modules/dsc.bicep' = {
+  name: 'dsc-broker-01'
   dependsOn: [
     gatewayDsc
     sessionHostDsc
