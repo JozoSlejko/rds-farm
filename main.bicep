@@ -98,6 +98,9 @@ param keyVaultCertSecretUri string = ''
 @description('Subject (or substring) used by the broker DSC to locate the cert in LocalMachine\\My, e.g. "CN=rdsgw.contoso.com".')
 param certificateSubject string = ''
 
+@description('Opaque marker forwarded to every CSE/DSC extension as properties.forceUpdateTag. Causes the platform to re-run Bootstrap.ps1 (and therefore re-apply whatever Configuration.zip is currently in the artifacts SA) on every deploy. Defaults to utcNow() so each `az deployment group create` mutates the value; pass a stable string (e.g. a release tag) only if you explicitly want CSE to stay quiescent.')
+param dscRevision string = utcNow()
+
 @description('Public FQDN clients type into Remote Desktop / RD Web (and what the cert Subject/SAN must match). Leave empty to use the LB DNS-label hostname (`<dnsLabel>.<region>.cloudapp.azure.com`) — only viable with a self-signed cert because a public CA will refuse to issue for `cloudapp.azure.com`. For production set this to a hostname you control, e.g. `rds.contoso.com`, and create a CNAME from that hostname to the LB FQDN after the first deploy.')
 param publicGatewayFqdn string = ''
 
@@ -252,6 +255,7 @@ module gatewayDsc 'modules/dsc.bicep' = {
     }
     artifactsLocation: artifactsLocation
     userAssignedIdentityClientId: identityClientIdForVms
+    forceUpdateTag: dscRevision
   }
 }
 
@@ -267,6 +271,7 @@ module sessionHostDsc 'modules/dsc.bicep' = [for i in range(0, sessionHostCount)
     }
     artifactsLocation: artifactsLocation
     userAssignedIdentityClientId: identityClientIdForVms
+    forceUpdateTag: dscRevision
   }
 }]
 
@@ -299,6 +304,7 @@ module brokerDsc 'modules/dsc.bicep' = {
     }
     artifactsLocation: artifactsLocation
     userAssignedIdentityClientId: identityClientIdForVms
+    forceUpdateTag: dscRevision
   }
 }
 

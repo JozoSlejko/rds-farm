@@ -36,6 +36,9 @@ param artifactsLocation string
 @description('Client ID of the user-assigned managed identity attached to the VM. CSE uses it to OAuth-download Bootstrap.ps1 + Configuration.zip from the artifacts SA (Storage Blob Data Reader granted by modules/sa-role.bicep).')
 param userAssignedIdentityClientId string
 
+@description('Opaque marker forwarded to properties.forceUpdateTag. Change this value to force the Custom Script Extension to re-run Bootstrap.ps1 and re-apply DSC.')
+param forceUpdateTag string
+
 // Accept either 'Foo' or 'Configuration.ps1\\Foo' for backwards compatibility
 // with the original DSC extension's <script>\<function> convention.
 var functionName    = last(split(configurationFunction, '\\'))
@@ -60,6 +63,7 @@ resource cse 'Microsoft.Compute/virtualMachines/extensions@2024-07-01' = {
     type: 'CustomScriptExtension'
     typeHandlerVersion: '1.10'
     autoUpgradeMinorVersion: true
+    forceUpdateTag: forceUpdateTag
     settings: {
       fileUris: [
         uri(artifactsLocation, 'Bootstrap.ps1')
