@@ -1246,6 +1246,12 @@ $stringPatches = [ordered]@{
     domainJoinOuPath                       = $DomainJoinOuPath
     localAdminUserName                     = $LocalAdminUserName
     gatewayDnsLabelPrefix                  = $GatewayDnsLabelPrefix
+    # Write the FQDN derived/validated in Step 1 back to the param so it can't
+    # drift from certificateSubject (which New-RdsCertificate.ps1 sets from the
+    # same $PublicGatewayFqdn). Without this the committed placeholder
+    # (rds.contoso.com) survives, GatewayExternalFqdn != cert subject, and RDS
+    # mints a competing self-signed gateway cert.
+    publicGatewayFqdn                      = $PublicGatewayFqdn
     rdsAccessGroup                         = $RdsAccessGroup
     artifactsLocation                      = $artifactsLocationUrl
     artifactsStorageAccountName            = $ArtifactsStorageAccount

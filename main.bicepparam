@@ -63,5 +63,6 @@ param keyVaultCertSecretUri = 'https://rdsjslejcokv01.vault.azure.net/secrets/rd
 //   cert because public CAs won't issue for `cloudapp.azure.com` (you don't own it).
 // - For production: set to a vanity hostname you own, and create a CNAME from it
 //   to `gatewayFqdn` (the LB FQDN output) after the first deploy.
-param publicGatewayFqdn = 'rds.contoso.com'
+// Lab: matches the Azure LB FQDN and the self-signed cert Subject/SAN below.
+param publicGatewayFqdn = 'rds-j-slejco.italynorth.cloudapp.azure.com'
 param certificateSubject = 'CN=rds-j-slejco.italynorth.cloudapp.azure.com'
