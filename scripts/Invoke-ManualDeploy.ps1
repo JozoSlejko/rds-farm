@@ -260,17 +260,40 @@ try {
     az bicep build-params --file $BicepParamFile --outfile $tmpParams.FullName 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         $compiled = Get-Content -LiteralPath $tmpParams.FullName -Raw | ConvertFrom-Json
-        $deployBastion = [bool]$compiled.parameters.deployBastion.value
-        $vnetName      = [string]$compiled.parameters.existingVnetName.value
-        $vnetRg        = [string]$compiled.parameters.existingVnetResourceGroup.value
-        $bastionSubnet = [string]$compiled.parameters.bastionSubnetName.value
+
+        function Get-CompiledParamValue {
+            param(
+                [Parameter(Mandatory)] $Compiled,
+                [Parameter(Mandatory)] [string] $Name,
+                $Default = $null
+            )
+
+            if (-not $Compiled -or -not $Compiled.parameters) { return $Default }
+            if ($Compiled.parameters.PSObject.Properties[$Name]) {
+                return $Compiled.parameters.$Name.value
+            }
+            return $Default
+        }
+
+        $deployBastion = [bool](Get-CompiledParamValue -Compiled $compiled -Name 'deployBastion' -Default $false)
+        $vnetName      = [string](Get-CompiledParamValue -Compiled $compiled -Name 'existingVnetName' -Default '')
+        $vnetRg        = [string](Get-CompiledParamValue -Compiled $compiled -Name 'existingVnetResourceGroup' -Default '')
+
+        # main.bicep defaults this to AzureBastionSubnet, but build-params JSON
+        # can omit params that are not explicitly set in main.bicepparam.
+        $bastionSubnet = [string](Get-CompiledParamValue -Compiled $compiled -Name 'bastionSubnetName' -Default 'AzureBastionSubnet')
+
         if ($deployBastion) {
-            az network vnet subnet show -g $vnetRg --vnet-name $vnetName -n $bastionSubnet -o none 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                $effectiveDeployBastion = 'true'
+            if ([string]::IsNullOrWhiteSpace($vnetRg) -or [string]::IsNullOrWhiteSpace($vnetName)) {
+                Write-Host "    [WARN] deployBastion=true but VNet params are unresolved in compiled bicepparam; leaving deployBastion unchanged." -ForegroundColor Yellow
             } else {
-                Write-Host "    [WARN] deployBastion=true but '$bastionSubnet' is missing in $vnetName - bastion will be skipped." -ForegroundColor Yellow
-                $effectiveDeployBastion = 'false'
+                az network vnet subnet show -g $vnetRg --vnet-name $vnetName -n $bastionSubnet -o none 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $effectiveDeployBastion = 'true'
+                } else {
+                    Write-Host "    [WARN] deployBastion=true but '$bastionSubnet' is missing in $vnetName - bastion will be skipped." -ForegroundColor Yellow
+                    $effectiveDeployBastion = 'false'
+                }
             }
         } else {
             $effectiveDeployBastion = 'false'
