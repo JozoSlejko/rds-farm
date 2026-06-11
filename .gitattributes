@@ -1,0 +1,19 @@
+# Default: auto detect text files and normalise to LF
+* text=auto
+
+# Force LF for common infra/dev files
+*.yml text eol=lf
+*.yaml text eol=lf
+*.bicep text eol=lf
+*.bicepparam text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+
+# Keep binary files untouched
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
