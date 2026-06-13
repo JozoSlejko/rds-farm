@@ -291,7 +291,7 @@ try {
                 if ($LASTEXITCODE -eq 0) {
                     $effectiveDeployBastion = 'true'
                 } else {
-                    Write-Host "    [WARN] deployBastion=true but '$bastionSubnet' is missing in $vnetName - bastion will be skipped." -ForegroundColor Yellow
+                    Write-Host "    [WARN] deployBastion=true but bastion subnet '$bastionSubnet' is not in $vnetName - skipping the IaC-managed (Standard SKU) bastion; the rest of the farm still deploys. A separately-created bastion (e.g. Developer SKU) is unaffected." -ForegroundColor Yellow
                     $effectiveDeployBastion = 'false'
                 }
             }

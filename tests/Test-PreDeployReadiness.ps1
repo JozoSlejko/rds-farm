@@ -206,24 +206,25 @@ if ($LASTEXITCODE -ne 0 -or -not $vnetJson) {
     }
 
     if ($deployBast) {
-        if ([string]::IsNullOrWhiteSpace($bastionSub)) {
-            # Misconfig: deployBastion=true but no subnet name supplied. The
-            # template will fall through to no-bastion, but flag it so the
-            # operator notices.
-            Write-TestResult "Bastion subnet name supplied (deployBastion=true)" $false `
-                "bastionSubnetName is empty in bicepparam. Set it to 'AzureBastionSubnet' (or your custom name) and pre-create the subnet (/26 or larger), or set deployBastion=false." -SoftWarn
-        }
-        else {
-            az network vnet subnet show -g $vnetRg --vnet-name $vnet -n $bastionSub -o none 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-TestResult "Bastion subnet '$bastionSub' present (deployBastion=true)" $true
-            } else {
-                # Soft fallback: deploy will skip bastion automatically (the CI
-                # pipeline overrides deployBastion=false in this case). Same
-                # behavior on the laptop path via Invoke-ManualDeploy.ps1.
-                Write-TestResult "Bastion subnet '$bastionSub' missing - bastion will be skipped at deploy time" $false `
-                    "Pre-create '$bastionSub' (exact name 'AzureBastionSubnet', /26 or larger) in $vnet if you want bastion provisioned." -SoftWarn
-            }
+        # main.bicep defaults bastionSubnetName to 'AzureBastionSubnet', but the
+        # compiled bicepparam JSON omits params that aren't explicitly set in
+        # main.bicepparam. Apply the same default here so this check mirrors
+        # Invoke-ManualDeploy.ps1 and actually runs the subnet-existence test
+        # below instead of short-circuiting on an "unset" value.
+        if ([string]::IsNullOrWhiteSpace($bastionSub)) { $bastionSub = 'AzureBastionSubnet' }
+
+        az network vnet subnet show -g $vnetRg --vnet-name $vnet -n $bastionSub -o none 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-TestResult "Bastion subnet '$bastionSub' present (deployBastion=true)" $true
+        } else {
+            # The bastion this template would deploy (Standard SKU) needs this
+            # subnet. When it's absent the deploy skips the bastion module
+            # (Invoke-ManualDeploy.ps1 and CI set deployBastion=false) and the
+            # rest of the farm still deploys. A bastion created out-of-band
+            # (e.g. a Developer-SKU host from the portal) is separate and
+            # unaffected by this.
+            Write-TestResult "Bastion subnet '$bastionSub' not found in $vnet - IaC bastion will be skipped" $false `
+                "Only affects the Standard-SKU bastion this template manages. To have the IaC deploy one, pre-create '$bastionSub' (/26 or larger) in $vnet. If you run a bastion separately, ignore this." -SoftWarn
         }
     }
 }
