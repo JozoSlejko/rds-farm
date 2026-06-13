@@ -284,10 +284,16 @@ configuration RDSDeployment {
             Name   = 'RDS-Licensing'
         }
 
+        # Base RSAT-RDS-Tools only - it provides the RemoteDesktop PowerShell
+        # module that every RDS Script resource below relies on. Do NOT set
+        # IncludeAllSubFeature: that pulls in GUI snap-ins (RSAT-RDS-Gateway,
+        # licensing-diagnosis UI) which need IIS UI packages that fail to
+        # install with 0x800f0922 on the Azure-Edition image. Those consoles
+        # are admin-only tooling the headless broker never uses, and forcing
+        # them made the whole broker DSC apply fail.
         WindowsFeature RSAT-RDS-Tools {
-            Ensure               = 'Present'
-            Name                 = 'RSAT-RDS-Tools'
-            IncludeAllSubFeature = $true
+            Ensure = 'Present'
+            Name   = 'RSAT-RDS-Tools'
         }
 
         # The RDS Script resources below all run as $AdminCreds
