@@ -20,6 +20,9 @@
           - keyVaultCertSecretUri matches https://<vault>.vault.azure.net/secrets/...
           - certificateSubject starts with 'CN='.
       * publicGatewayFqdn (when set) is a syntactically valid DNS name.
+      * When deployBastion is true, the effective bastionSubnetName (explicit
+        value or the main.bicep default) is exactly 'AzureBastionSubnet' -
+        Azure Bastion rejects any other subnet name.
 
     Exits non-zero on any failure.
 
@@ -152,6 +155,23 @@ if ($certEnabled) {
     Write-TestResult "publicGatewayFqdn is a valid DNS name ($fqdn)" $fqdnOk
 } else {
     Write-Host '[SKIP] enableCertificateBinding = false; cert checks not applicable' -ForegroundColor DarkGray
+}
+
+# 7. Bastion — when deployBastion is true the subnet must be named exactly
+# 'AzureBastionSubnet' (a hard Azure requirement; any other name fails the
+# bastion deploy). main.bicep defaults deployBastion=true and
+# bastionSubnetName='AzureBastionSubnet', but the compiled JSON omits params
+# not explicitly set in the bicepparam, so apply the same defaults here.
+$deployBastionRaw = Get-ParamValue 'deployBastion'
+$deployBastion    = if ($null -eq $deployBastionRaw) { $true } else { [bool]$deployBastionRaw }
+if ($deployBastion) {
+    $bastionSubnet = Get-ParamValue 'bastionSubnetName'
+    if ([string]::IsNullOrWhiteSpace($bastionSubnet)) { $bastionSubnet = 'AzureBastionSubnet' }
+    Write-TestResult "bastionSubnetName is 'AzureBastionSubnet' when deployBastion=true (got '$bastionSubnet')" `
+        ($bastionSubnet -eq 'AzureBastionSubnet') `
+        "Azure Bastion requires the subnet to be named exactly 'AzureBastionSubnet'. Set deployBastion=false if you reach the VMs another way."
+} else {
+    Write-Host '[SKIP] deployBastion = false; bastion subnet check not applicable' -ForegroundColor DarkGray
 }
 
 # Summary
