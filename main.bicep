@@ -303,6 +303,11 @@ module brokerDsc 'modules/dsc.bicep' = {
       CertificateSubject: certificateSubject
       RDUserGroup: rdsAccessGroup
       DomainJoinUserName: domainJoinUserName
+      // Lets BindRDSCertificates fetch the still-exportable PFX straight from
+      // Key Vault via the VM's UAMI. The KV VM extension v4.0+ installs the
+      // local private key as non-exportable, so export-from-store fails.
+      KeyVaultCertSecretUri: keyVaultCertSecretUri
+      IdentityClientId: identityClientIdForVms
     }
     protectedItems: {
       AdminCreds: {

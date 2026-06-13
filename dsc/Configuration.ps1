@@ -261,7 +261,9 @@ configuration RDSDeployment {
         [string] $CollectionName     = 'DesktopCollection',
         [string] $CertificateSubject = '',
         [string] $RDUserGroup        = 'Domain Users',
-        [string] $DomainJoinUserName = ''
+        [string] $DomainJoinUserName = '',
+        [string] $KeyVaultCertSecretUri = '',
+        [string] $IdentityClientId      = ''
     )
 
     Import-DscResource -ModuleName PSDesiredStateConfiguration
@@ -518,8 +520,13 @@ configuration RDSDeployment {
                     Import-Module RemoteDesktop -ErrorAction Stop
                     $current = Get-RDCertificate -ConnectionBroker $using:ConnectionBroker -ErrorAction SilentlyContinue
                     if ($null -eq $current) { return $false }
+                    # Match on Subject only - NOT Level. A self-signed cert binds
+                    # as Level='NotTrusted', so requiring 'Trusted' would mean the
+                    # resource never reports converged and re-runs every pass.
+                    # Roles still NotConfigured have an empty Subject and won't
+                    # match, so subject + count>=4 is the correct convergence test.
                     $matched = @($current | Where-Object {
-                        $_.Level -eq 'Trusted' -and $_.Subject -like "*$using:CertificateSubject*"
+                        $_.Subject -like "*$using:CertificateSubject*"
                     })
                     return ($matched.Count -ge 4)
                 } catch {
@@ -530,33 +537,62 @@ configuration RDSDeployment {
             SetScript = {
                 Import-Module RemoteDesktop
 
-                $subject = $using:CertificateSubject
-
-                # Brief retry: the broker's RDS Management service can return
-                # null for Get-RDServer for a few seconds after
-                # New-RDSessionDeployment finishes. Don't fight it; just wait.
-                $cert = $null
-                for ($attempt = 1; $attempt -le 5; $attempt++) {
-                    $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
-                        Where-Object { $_.Subject -like "*$subject*" -and $_.HasPrivateKey } |
-                        Sort-Object NotAfter -Descending |
-                        Select-Object -First 1
-                    if ($null -ne $cert) { break }
-                    Write-Verbose "BindRDSCertificates: cert not found yet (attempt $attempt/5), waiting 15s."
-                    Start-Sleep -Seconds 15
-                }
-
-                if ($null -eq $cert) {
-                    throw "Certificate with subject containing '$subject' not found in LocalMachine\My after 5 attempts. " +
-                          "Verify the Key Vault VM extension has run on the broker and that the cert policy has exportable=true."
-                }
+                $subject  = $using:CertificateSubject
+                $kvUri    = $using:KeyVaultCertSecretUri
+                $clientId = $using:IdentityClientId
 
                 $pfxPath    = Join-Path $env:TEMP ("rds-cert-{0}.pfx" -f ([guid]::NewGuid().ToString('N')))
                 $pfxPwdText = [guid]::NewGuid().ToString('N') + 'A1!'
                 $pfxPwd     = ConvertTo-SecureString -String $pfxPwdText -Force -AsPlainText
 
                 try {
-                    Export-PfxCertificate -Cert $cert.PSPath -FilePath $pfxPath -Password $pfxPwd -Force | Out-Null
+                    if (-not [string]::IsNullOrEmpty($kvUri)) {
+                        # Preferred path: pull the cert straight from Key Vault via
+                        # the VM's user-assigned managed identity. The Key Vault VM
+                        # extension v4.0+ installs the LOCAL private key as
+                        # NON-exportable (CNG), so Export-PfxCertificate from
+                        # LocalMachine\My fails with "Cannot export non-exportable
+                        # private key". The copy in Key Vault is still exportable,
+                        # so fetch the PKCS12 secret from there and re-wrap it with
+                        # a transient password (Set-RDCertificate needs a PFX file
+                        # plus password).
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+                        $tokenUri = 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net'
+                        if (-not [string]::IsNullOrEmpty($clientId)) { $tokenUri += "&client_id=$clientId" }
+                        $token = (Invoke-RestMethod -Headers @{ Metadata = 'true' } -Uri $tokenUri).access_token
+
+                        $sep    = if ($kvUri -match '\?') { '&' } else { '?' }
+                        $secUri = "$kvUri$($sep)api-version=7.4"
+                        $secret = (Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } -Uri $secUri).value
+                        if ([string]::IsNullOrEmpty($secret)) {
+                            throw "Key Vault returned an empty secret for '$kvUri'."
+                        }
+
+                        $bytes = [Convert]::FromBase64String($secret)
+                        $col   = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+                        $col.Import($bytes, $null, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+                        [IO.File]::WriteAllBytes($pfxPath, $col.Export('Pkcs12', $pfxPwdText))
+                        Write-Verbose "BindRDSCertificates: fetched cert from Key Vault ($kvUri)."
+                    } else {
+                        # Legacy fallback: export the cert from LocalMachine\My.
+                        # Only works when the private key is exportable (Key Vault
+                        # VM extension < 4.0). Retained for back-compat.
+                        $cert = $null
+                        for ($attempt = 1; $attempt -le 5; $attempt++) {
+                            $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                                Where-Object { $_.Subject -like "*$subject*" -and $_.HasPrivateKey } |
+                                Sort-Object NotAfter -Descending |
+                                Select-Object -First 1
+                            if ($null -ne $cert) { break }
+                            Write-Verbose "BindRDSCertificates: cert not found yet (attempt $attempt/5), waiting 15s."
+                            Start-Sleep -Seconds 15
+                        }
+                        if ($null -eq $cert) {
+                            throw "Certificate with subject containing '$subject' not found in LocalMachine\My after 5 attempts, and no KeyVaultCertSecretUri was supplied."
+                        }
+                        Export-PfxCertificate -Cert $cert.PSPath -FilePath $pfxPath -Password $pfxPwd -Force | Out-Null
+                    }
 
                     $failed = @()
                     foreach ($role in 'RDGateway','RDWebAccess','RDPublishing','RDRedirector') {

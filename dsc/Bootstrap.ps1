@@ -163,6 +163,19 @@ try {
     Start-DscConfiguration -Path $mofDir -Wait -Force -Verbose
     Write-Host "    Start-DscConfiguration completed."
 
+    # Surface partial failures. Start-DscConfiguration -Wait does NOT throw when
+    # an individual resource's SetScript fails - it logs to the DSC stream and
+    # returns normally. Without this gate the CSE (and therefore the ARM
+    # deployment) reports success even when, e.g., certificate binding failed,
+    # hiding the problem behind a green deploy. Only an explicit Status='Failure'
+    # is treated as fatal, so a benign pending-reboot does not trip it.
+    $dscStatus = Get-DscConfigurationStatus -ErrorAction SilentlyContinue
+    if ($null -ne $dscStatus -and $dscStatus.Status -ne 'Success') {
+        $failedIds = @($dscStatus.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }) -join ', '
+        throw "DSC apply did not converge (Status=$($dscStatus.Status)). Resources not in desired state: $failedIds"
+    }
+    Write-Host "    DSC convergence: $(if ($dscStatus) { $dscStatus.Status } else { 'unverified' })"
+
     # -----------------------------------------------------------------------
     # 6. Reboot handling
     # -----------------------------------------------------------------------
