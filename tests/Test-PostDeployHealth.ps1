@@ -11,15 +11,19 @@
     Tests performed:
       1. Every VM extension reports provisioningState = Succeeded.
       2. Every VM availability state in Resource Health = Available.
-      3. Load Balancer backend health probe shows the gateway pool Up.
+      3. Load Balancer backend pool health (informational soft-warn when the
+         Azure LB health API can't be queried - VM ext + Resource Health are
+         the authoritative signals).
       4. gatewayFqdn DNS resolves.
-      5. https://<gatewayFqdn>/RDWeb/ returns 200 (soft warn if the runner's
-         egress IP isn't in allowedClientSourceAddressPrefixes).
+      5. https://<gatewayFqdn>/RDWeb/ returns 200 (soft warn if this machine's
+         public IP isn't in allowedClientSourceAddressPrefixes, or the gateway
+         is still warming up).
       6. If publicGatewayFqdn differs from gatewayFqdn, DNS for the vanity
          hostname is also checked.
 
-    Exits non-zero on any HARD failure (categories 1-3); category 5 is a soft
-    warning so the test still passes from a runner that isn't in the allow-list.
+    Exits non-zero on any HARD failure (categories 1-2); categories 3 and 5
+    are soft warnings so the test still passes from a machine that isn't in
+    the allow-list.
 
 .PARAMETER ResourceGroupName
     The RG that contains the deployment.
@@ -73,7 +77,18 @@ if ($LASTEXITCODE -ne 0 -or -not $deployJson) {
 }
 
 $deploy = $deployJson | ConvertFrom-Json
-Write-TestResult "Deployment '$DeploymentName' exists (state=$($deploy.state))" $true
+if ($deploy.state -eq 'Succeeded') {
+    Write-TestResult "Deployment '$DeploymentName' found (state=Succeeded)" $true
+} else {
+    # Not a failure for THIS health check: it only reads the gateway FQDN from
+    # the deployment and falls back to the load balancer's public IP when the
+    # outputs are missing. A stale or Failed record named exactly
+    # '$DeploymentName' is normal when you deploy with Invoke-ManualDeploy.ps1,
+    # which names its deployments '<name>-<timestamp>' (e.g. main-20260614-1012).
+    Write-TestResult "Deployment '$DeploymentName' found (state=$($deploy.state)) - used only to read the gateway FQDN" $true
+    Write-Host "       This is not a problem: the rest of the checks just need the gateway FQDN." -ForegroundColor DarkYellow
+    Write-Host "       Tip: manual deploys are named '$DeploymentName-<timestamp>'; pass -DeploymentName <name> to target one." -ForegroundColor DarkYellow
+}
 
 if ($deploy.outputs -and $deploy.outputs.gatewayFqdn) {
     $gatewayFqdn       = $deploy.outputs.gatewayFqdn.value
@@ -149,27 +164,34 @@ if (-not $lbId) {
     if (-not $poolNames) {
         Write-TestResult 'LB backend pool health = Up' $false 'No backend pools found.' -SoftWarn
     } else {
-        $allUp = $true
-        $detail = @()
+        $down        = @()
+        $unqueryable = @()
         foreach ($pool in $poolNames) {
             $healthJson = az rest --method post `
                 --uri "https://management.azure.com$lbId/backendAddressPools/$pool/health?api-version=2024-05-01" `
                 -o json 2>$null
             if ($LASTEXITCODE -ne 0 -or -not $healthJson) {
-                $allUp = $false
-                $detail += "$pool=unqueryable"
+                $unqueryable += $pool
                 continue
             }
             $bh = $healthJson | ConvertFrom-Json
             foreach ($addr in @($bh.backendAddresses)) {
                 $hs = $addr.health.healthStatus
                 if ($hs -ne 'Up') {
-                    $allUp = $false
-                    $detail += "$pool/$($addr.networkInterfaceIPConfiguration.id | Split-Path -Leaf)=$hs"
+                    $down += "$pool/$($addr.networkInterfaceIPConfiguration.id | Split-Path -Leaf)=$hs"
                 }
             }
         }
-        Write-TestResult 'LB backend pool health = Up' $allUp ($detail -join '; ') -SoftWarn:(-not $allUp)
+        if ($down.Count -gt 0) {
+            # A backend actually reporting not-Up is the one worth surfacing.
+            # Still soft: VM extension state + Resource Health are authoritative.
+            Write-TestResult 'LB backend pool: one or more backends not Up' $false ($down -join '; ') -SoftWarn
+        } elseif ($unqueryable.Count -gt 0) {
+            Write-TestResult "LB backend pool health could not be queried ($($unqueryable -join ', '))" $false `
+                'The Azure LB health API returned nothing for this pool (common right after deploy or in some regions). It does NOT mean a backend is down - the VM extension and Resource Health checks above already confirm the backends are up. Informational only.' -SoftWarn
+        } else {
+            Write-TestResult 'LB backend pool health: all backends Up' $true
+        }
     }
 }
 
@@ -197,8 +219,18 @@ if ($publicGatewayFqdn) {
         }
     } catch {
         $msg = $_.Exception.Message
-        # Timeout / connect-refused is most likely the runner's egress IP isn't in allowedClientSourceAddressPrefixes.
-        Write-TestResult "RD Web reachable: $rdWebUrl (runner may not be in allow-list)" $false $msg -SoftWarn
+        # A timeout/connection-refused from here almost always means this
+        # machine's public IP isn't in allowedClientSourceAddressPrefixes (the
+        # NSG silently drops non-allowed clients, so the TLS handshake never
+        # completes). It can also be the gateway still warming up right after a
+        # deploy. Either way it's a soft warning - it doesn't prove the gateway
+        # is unhealthy, only that THIS machine couldn't reach it.
+        if ($msg -match 'timeout|timed out|canceled|actively refused|unreachable') {
+            Write-TestResult "RD Web not reachable from this machine: $rdWebUrl" $false `
+                "Connection timed out. Most likely this machine's public IP isn't in allowedClientSourceAddressPrefixes, or the gateway is still warming up. Expected when running from outside the allow-list - verify from an allow-listed client." -SoftWarn
+        } else {
+            Write-TestResult "RD Web not reachable from this machine: $rdWebUrl" $false $msg -SoftWarn
+        }
     }
 }
 
