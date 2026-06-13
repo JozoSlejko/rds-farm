@@ -29,7 +29,11 @@
     The RG that contains the deployment.
 
 .PARAMETER DeploymentName
-    The deployment name to read outputs from (default 'main').
+    The deployment name to read the gateway FQDN from (default 'main'). When
+    left at the default, the script auto-selects the most recent deployment
+    named 'main' or 'main-<timestamp>' that actually carries outputs - manual
+    deploys via Invoke-ManualDeploy.ps1 are named '<name>-<timestamp>'. Pass an
+    explicit name to target one specific deployment and skip auto-selection.
 
 .EXAMPLE
     pwsh -File tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg
@@ -64,30 +68,52 @@ function Write-TestResult {
 Write-Host "Resource group: $ResourceGroupName" -ForegroundColor Cyan
 Write-Host ('-' * 60)
 
-# 0. Deployment outputs — best-effort. A Failed parent deployment (e.g. one
-#    sub-module failed) leaves outputs=null but the rest of the infra is still
-#    worth checking; we fall back to querying the LB directly in that case.
-$deployJson = az deployment group show -g $ResourceGroupName -n $DeploymentName --query "{state:properties.provisioningState, outputs:properties.outputs}" -o json 2>$null
+# 0. Resolve which deployment to read the gateway FQDN from, then read it.
+#    Best-effort: a Failed parent deployment leaves outputs=null but the rest of
+#    the infra is still worth checking, so we fall back to querying the LB
+#    directly in that case.
+#
+#    When -DeploymentName is left at its default, auto-select the most recent
+#    deployment named '<name>' or '<name>-<timestamp>' that actually carries the
+#    gateway FQDN output. Invoke-ManualDeploy.ps1 names its deployments
+#    '<name>-<timestamp>' (e.g. main-20260614-101200), so a literal 'main'
+#    lookup usually lands on a stale / Failed record with no outputs.
 $gatewayFqdn       = $null
 $publicGatewayFqdn = $null
+$resolvedName      = $DeploymentName
+
+if (-not $PSBoundParameters.ContainsKey('DeploymentName')) {
+    $listJson = az deployment group list -g $ResourceGroupName `
+        --query "[?name=='$DeploymentName' || starts_with(name, '$DeploymentName-')].{name:name, ts:properties.timestamp, fqdn:properties.outputs.gatewayFqdn.value}" `
+        -o json 2>$null
+    if ($LASTEXITCODE -eq 0 -and $listJson) {
+        $withFqdn = @(($listJson | ConvertFrom-Json) |
+            Where-Object { $_.fqdn } |
+            Sort-Object { [datetime]$_.ts } -Descending)
+        if ($withFqdn.Count -gt 0) { $resolvedName = $withFqdn[0].name }
+    }
+}
+
+$deployJson = az deployment group show -g $ResourceGroupName -n $resolvedName --query "{state:properties.provisioningState, outputs:properties.outputs}" -o json 2>$null
 
 if ($LASTEXITCODE -ne 0 -or -not $deployJson) {
-    Write-TestResult "Deployment '$DeploymentName' exists in $ResourceGroupName" $false 'Deployment not found.'
+    Write-TestResult "Deployment '$resolvedName' exists in $ResourceGroupName" $false 'Deployment not found.'
     exit 1
 }
 
 $deploy = $deployJson | ConvertFrom-Json
+if ($resolvedName -ne $DeploymentName) {
+    Write-Host "Auto-selected deployment '$resolvedName' (most recent '$DeploymentName-*' carrying outputs)." -ForegroundColor DarkGray
+}
 if ($deploy.state -eq 'Succeeded') {
-    Write-TestResult "Deployment '$DeploymentName' found (state=Succeeded)" $true
+    Write-TestResult "Deployment '$resolvedName' found (state=Succeeded)" $true
 } else {
     # Not a failure for THIS health check: it only reads the gateway FQDN from
     # the deployment and falls back to the load balancer's public IP when the
-    # outputs are missing. A stale or Failed record named exactly
-    # '$DeploymentName' is normal when you deploy with Invoke-ManualDeploy.ps1,
-    # which names its deployments '<name>-<timestamp>' (e.g. main-20260614-1012).
-    Write-TestResult "Deployment '$DeploymentName' found (state=$($deploy.state)) - used only to read the gateway FQDN" $true
+    # outputs are missing.
+    Write-TestResult "Deployment '$resolvedName' found (state=$($deploy.state)) - used only to read the gateway FQDN" $true
     Write-Host "       This is not a problem: the rest of the checks just need the gateway FQDN." -ForegroundColor DarkYellow
-    Write-Host "       Tip: manual deploys are named '$DeploymentName-<timestamp>'; pass -DeploymentName <name> to target one." -ForegroundColor DarkYellow
+    Write-Host "       Tip: pass -DeploymentName <name> to target a specific deployment." -ForegroundColor DarkYellow
 }
 
 if ($deploy.outputs -and $deploy.outputs.gatewayFqdn) {
