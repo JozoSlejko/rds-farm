@@ -110,6 +110,13 @@
     (<label>.<region>.cloudapp.azure.com). Defaults to a sanitised version
     of -PublicGatewayFqdn.
 
+.PARAMETER DeployBastion
+    Whether the farm template deploys an Azure Bastion (Standard SKU; needs an
+    AzureBastionSubnet in the VNet). Default $true. Pass -DeployBastion:$false
+    when you reach the VMs another way - a Developer-SKU bastion you created
+    yourself, a jumpbox, etc. The value is written into main.bicepparam so
+    deploys are deterministic and don't rely on the template default.
+
 .PARAMETER ArtifactsStorageAccount
     Globally unique storage account name (3-24 chars, lowercase
     alphanumeric) that will be created to hold Configuration.zip. Required.
@@ -233,6 +240,12 @@ param(
     # Gateway hostname
     [string]$PublicGatewayFqdn,
     [string]$GatewayDnsLabelPrefix,
+
+    # Bastion (admin access). Default $true matches main.bicep. Set $false when
+    # you reach the VMs another way (a Developer-SKU bastion you manage out of
+    # band, a jumpbox, etc.). Written to main.bicepparam in Step 6 so the
+    # script owns the value instead of leaving the template default.
+    [bool]$DeployBastion = $true,
 
     # Prereqs
     [string]$ArtifactsStorageAccount,
@@ -492,6 +505,20 @@ function Update-BicepParamString {
     return [regex]::Replace($Body, $pattern, "`${lead}'$Value'")
 }
 
+function Update-BicepParamBool {
+    param(
+        [Parameter(Mandatory)][string]$Body,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][bool]$Value
+    )
+    $literal = if ($Value) { 'true' } else { 'false' }
+    $pattern = "(?m)^(?<lead>\s*param\s+$([regex]::Escape($Name))\s*=\s*)(?:true|false)"
+    if ($Body -notmatch $pattern) {
+        throw "param '$Name' (bool) not found in $BicepParamFile (expected '$Name = true|false' on a single line)."
+    }
+    return [regex]::Replace($Body, $pattern, "`${lead}$literal")
+}
+
 function Update-BicepParamArray {
     param(
         [Parameter(Mandatory)][string]$Body,
@@ -526,6 +553,7 @@ $script:RdsFarmInitConfigSections = @(
     @{ Title = 'Active Directory'    ; Params = @('AdDomainName','AdDnsServerIp','DomainJoinUserName','DomainJoinOuPath','LocalAdminUserName','RdsAccessGroup') }
     @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes') }
     @{ Title = 'Gateway hostname'    ; Params = @('PublicGatewayFqdn','GatewayDnsLabelPrefix') }
+    @{ Title = 'Bastion'             ; Params = @('DeployBastion') }
     @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
     @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName') }
     @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
@@ -885,6 +913,16 @@ if ($Interactive -or -not $AllowedClientSourceAddressPrefixes) {
         )
 }
 
+if ($Interactive) {
+    $DeployBastion = [bool] (Read-OptionalSwitch `
+        -Prompt 'Deploy an Azure Bastion for admin access?' `
+        -Default $DeployBastion `
+        -Hint @(
+            'Adds a Standard-SKU Azure Bastion. Requires an AzureBastionSubnet (/26+) in the VNet above.',
+            'Answer n if you reach the VMs another way - a Developer-SKU bastion you created yourself, or a jumpbox.'
+        ))
+}
+
 # Cert mode is gathered BEFORE the FQDN so the FQDN prompt can branch on it:
 # SelfSigned lets you skip -PublicGatewayFqdn entirely and use the Azure-
 # managed LB hostname; Csr / ImportPfx require a vanity FQDN you own (public
@@ -997,6 +1035,7 @@ Write-Host "    Allowed client CIDRs         : $($AllowedClientSourceAddressPref
 Write-Host "    Public gateway FQDN          : $PublicGatewayFqdn"
 Write-Host "    Cert subject                 : $certificateSubject"
 Write-Host "    Azure PIP DNS label          : $GatewayDnsLabelPrefix.$Location.cloudapp.azure.com"
+Write-Host "    Deploy Azure Bastion         : $DeployBastion"
 Write-Host "    Artifacts SA                 : $ArtifactsStorageAccount (RG $ArtifactsResourceGroup)"
 Write-Host "    Key Vault                    : $KeyVaultName (RG $KeyVaultResourceGroup)"
 Write-Host "    Farm RG (deploy target)      : $FarmResourceGroup ($Location)"
@@ -1262,10 +1301,11 @@ foreach ($name in $stringPatches.Keys) {
     $content = Update-BicepParamString -Body $content -Name $name -Value $stringPatches[$name]
 }
 $content = Update-BicepParamArray -Body $content -Name 'allowedClientSourceAddressPrefixes' -Values $AllowedClientSourceAddressPrefixes
+$content = Update-BicepParamBool  -Body $content -Name 'deployBastion' -Value $DeployBastion
 
 Set-Content -LiteralPath $BicepParamFile -Value $content -Encoding utf8 -NoNewline
 $newLen = (Get-Item -LiteralPath $BicepParamFile).Length
-Write-Host "    Patched $($stringPatches.Count + 1) param(s). ($origLen -> $newLen bytes)"
+Write-Host "    Patched $($stringPatches.Count + 2) param(s). ($origLen -> $newLen bytes)"
 
 # Compile-check
 Write-Host "    Validating with 'az bicep build-params'..."
