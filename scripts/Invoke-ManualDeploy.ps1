@@ -339,9 +339,20 @@ if ($Action -eq 'deploy') {
         foreach ($prop in $o.PSObject.Properties) {
             Write-Host ("{0,-22}: {1}" -f $prop.Name, $prop.Value.value)
         }
+
+        # The CNAME step only applies to a vanity FQDN: publicGatewayFqdn is the
+        # hostname clients type, gatewayFqdn is the Azure LB hostname. When they
+        # match, publicGatewayFqdn was left empty / set to the LB FQDN (the
+        # self-signed lab path) and there's nothing to CNAME.
+        $publicFqdn = if ($o.PSObject.Properties['publicGatewayFqdn']) { [string]$o.publicGatewayFqdn.value } else { '' }
+        $lbFqdn     = if ($o.PSObject.Properties['gatewayFqdn'])       { [string]$o.gatewayFqdn.value }       else { '' }
+        $usesVanityFqdn = $publicFqdn -and $lbFqdn -and ($publicFqdn -ne $lbFqdn)
+
         Write-Host ""
         Write-Host "Next:" -ForegroundColor Cyan
-        Write-Host "  * Create the CNAME (vanity FQDN): scripts/Set-GatewayCname.ps1"
+        if ($usesVanityFqdn) {
+            Write-Host "  * Point your vanity FQDN at the LB: CNAME $publicFqdn -> $lbFqdn (scripts/Set-GatewayCname.ps1)"
+        }
         Write-Host "  * Run smoke tests              : tests/Test-PostDeployHealth.ps1 -ResourceGroupName $ResourceGroup"
     }
 } else {
