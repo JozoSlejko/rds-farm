@@ -66,6 +66,19 @@
     validate`). Skip only when you have a known-bad config you're explicitly
     trying to deploy.
 
+.PARAMETER SkipPostDeployTest
+    Skip the automatic tests/Test-PostDeployHealth.ps1 smoke test that runs
+    after a successful `-Action deploy`. By default the wrapper runs it so the
+    jumpbox flow is deploy-and-verify in one command (the CI post-deploy job
+    can't run — the runner is outside the VNet). A non-zero test result is
+    surfaced but does not fail the deploy (the farm is already deployed).
+
+.PARAMETER AddClientIpToNsg
+    Forwarded to the post-deploy smoke test. Temporarily opens the subnet
+    governance NSG to this machine's public IP so the RD Web reachability
+    check can pass from a host that isn't in allowedClientSourceAddressPrefixes,
+    then removes the rule. No effect with -SkipPostDeployTest or -Action what-if.
+
 .EXAMPLE
     # Preview a manual deployment
     .\scripts\Invoke-ManualDeploy.ps1 -StorageAccount contosordsart01
@@ -102,7 +115,9 @@ param(
 
     [switch]$SkipPublish,
     [switch]$SkipWhatIf,
-    [switch]$SkipReadinessCheck
+    [switch]$SkipReadinessCheck,
+    [switch]$SkipPostDeployTest,
+    [switch]$AddClientIpToNsg
 )
 
 $ErrorActionPreference = 'Stop'
@@ -353,7 +368,33 @@ if ($Action -eq 'deploy') {
         if ($usesVanityFqdn) {
             Write-Host "  * Point your vanity FQDN at the LB: CNAME $publicFqdn -> $lbFqdn (scripts/Set-GatewayCname.ps1)"
         }
-        Write-Host "  * Run smoke tests              : tests/Test-PostDeployHealth.ps1 -ResourceGroupName $ResourceGroup"
+        if ($SkipPostDeployTest) {
+            Write-Host "  * Run smoke tests              : tests/Test-PostDeployHealth.ps1 -ResourceGroupName $ResourceGroup"
+        }
+    }
+
+    # Deploy-and-verify in one command: the CI post-deploy-tests job can't run
+    # (the runner is outside the VNet), so run the smoke test here unless asked
+    # not to. A failing test does NOT fail the deploy - the farm is already up;
+    # we just surface the result so it's visible.
+    if (-not $SkipPostDeployTest) {
+        $postDeployTest = Join-Path $PSScriptRoot '..' 'tests' 'Test-PostDeployHealth.ps1'
+        if (Test-Path -LiteralPath $postDeployTest) {
+            Write-Host ""
+            Write-Host "==> Step 6: post-deploy smoke test" -ForegroundColor Green
+            $testArgs = @{ ResourceGroupName = $ResourceGroup }
+            if ($AddClientIpToNsg) { $testArgs['AddClientIpToNsg'] = $true }
+            try {
+                & $postDeployTest @testArgs
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "    Post-deploy smoke test reported failures (exit $LASTEXITCODE). The farm is deployed; review the output above." -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "    Post-deploy smoke test could not run: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    (post-deploy smoke test not found at $postDeployTest - skipped)" -ForegroundColor DarkYellow
+        }
     }
 } else {
     Write-Host ""

@@ -76,7 +76,7 @@ Run from a machine with line-of-sight to the VNet (laptop on VPN, or a jumpbox i
 - [ ] **Pre-flight:** `./tests/Test-PreDeployReadiness.ps1` (exits 1 on any FAIL).
 - [ ] **Preview:** `./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount <sa>`
 - [ ] **Apply:** `./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount <sa>`
-- [ ] **Run post-deploy smoke tests:** `./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg`.
+- [ ] **Smoke test** runs automatically after a successful deploy (add `-SkipPostDeployTest` to skip, or `-AddClientIpToNsg` for a green RD Web result from a non-allow-listed host). Re-run on demand: `./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg`.
 
 The wrapper packages DSC (`Configuration.zip` + `Bootstrap.ps1`), uploads it via `--auth-mode login`, prompts for `DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` if missing, and runs `what-if` + `create`. The DSC extension reads the blobs back at apply-time with the VMs' user-assigned managed identity (no SAS — tenant policy forbids it). Equivalent broken-down `az` commands: [Manual deploy](./manual-deploy.md).
 

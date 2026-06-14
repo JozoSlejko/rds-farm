@@ -119,8 +119,11 @@ packages DSC ([`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact
 ```
 
 Typical wall-clock on `Standard_D4s_v5`: **25–40 min** (VM provisioning + domain-join reboot +
-DSC role install + RDS deployment). What the deploy does to the VMs, step by step (Bicep + DSC,
-12 steps), and the by-hand `az` equivalents: [Manual deploy](./manual-deploy.md).
+DSC role install + RDS deployment). On a successful `-Action deploy` the wrapper then runs the
+post-deploy smoke test automatically ([step 4](#4-verify)) — add `-SkipPostDeployTest` to skip it,
+or `-AddClientIpToNsg` to also get a green RD Web result from a non-allow-listed host. What the
+deploy does to the VMs, step by step (Bicep + DSC, 12 steps), and the by-hand `az` equivalents:
+[Manual deploy](./manual-deploy.md).
 
 > If the readiness check warns that Key Vault / the storage account is unreachable from this
 > host, you're running from **outside** the VNet — move to a laptop on VPN or an in-VNet jumpbox.
@@ -129,6 +132,9 @@ DSC role install + RDS deployment). What the deploy does to the VMs, step by ste
 ---
 
 ## 4. Verify
+
+`Invoke-ManualDeploy.ps1 -Action deploy` runs this automatically on success. To run it on demand
+(or after `-SkipPostDeployTest`):
 
 ```powershell
 ./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg
