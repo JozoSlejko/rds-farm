@@ -43,14 +43,14 @@ Useful switches:
 | --- | --- | --- |
 | [`tests/Test-CiPrerequisites.ps1`](../tests/Test-CiPrerequisites.ps1) | Entra app exists, service principal exists, all 4 federated credentials present with expected subjects, sub-scope role assignments (`Contributor` + `Role Based Access Control Administrator`), 5 repo secrets set, `ARTIFACTS_STORAGE_ACCOUNT` repo variable + the SA it points at, `preview` + `production` GitHub environments exist | `az` + `gh` signed in, Reader on the subscription |
 | [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1) | `main.bicepparam` compiles (with `readEnvironmentVariable` resolution), guard-rails hold (no `0.0.0.0/0`, valid AD DNS IP, NetBIOS-safe naming, KV cert URI shape when `enableCertificateBinding = true`) | none — pure config check |
-| [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) | Existing VNet + RDS subnet present with enough usable IPs, Key Vault exists in RBAC mode, referenced cert exists with `exportable: true` and 30+ days to expiry, (optional) `Configuration.zip` reachable via SAS, `az deployment group validate` against the target RG | `az` signed in, Reader on the VNet RG + KV RG + Contributor on the target RG (for the implicit `az group create` step 4 makes — use `-SkipBicepValidate` to skip it) |
+| [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) | Existing VNet + RDS subnet present with enough usable IPs, Key Vault exists in RBAC mode, referenced cert exists with `exportable: true` and 30+ days to expiry, (optional) `Configuration.zip` reachable via managed identity (`--auth-mode login`), `az deployment group validate` against the target RG | `az` signed in, Reader on the VNet RG + KV RG + Contributor on the target RG (for the implicit `az group create` step 4 makes — use `-SkipBicepValidate` to skip it) |
 
 These also run inside [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) as the `pre-deploy-checks` job, except `Test-CiPrerequisites.ps1` which is a manual sanity tool (CI itself **is** the prerequisites — if they were broken, the workflow could not have started).
 
 ## 1. Pre-deployment (no resources touched)
 
 > [!TIP]
-> **Scripted shortcut.** [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) bundles all of (a), (b), (c) below with extra checks — VNet/subnet capacity (does the subnet have enough free IPs for `sessionHostCount + 2`?), Key Vault cert exists with `exportable: true` and 30+ days to expiry, SAS reachability (`HEAD` on `artifactsLocation + Configuration.zip?<SAS>`), `az deployment group validate`, and chains [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1):
+> **Scripted shortcut.** [`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) bundles all of (a), (b), (c) below with extra checks — VNet/subnet capacity (does the subnet have enough free IPs for `sessionHostCount + 2`?), Key Vault cert exists with `exportable: true` and 30+ days to expiry, blob reachability via managed identity (`az storage blob exists --auth-mode login`), `az deployment group validate`, and chains [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1):
 >
 > ```powershell
 > ./tests/Test-PreDeployReadiness.ps1
@@ -185,13 +185,21 @@ Finally, launch **Remote Desktop Connection**, set **Advanced → Connect from a
 
 ## 5. Continuous testing in CI
 
-The `.github/workflows/deploy.yml` pipeline runs all of the above automatically, in three layers:
+> [!IMPORTANT]
+> **The pipeline can't run today.** The artifacts storage account and Key Vault are
+> private-endpoint-only, and a GitHub-hosted runner is outside the VNet, so Layers 2–3
+> below fail from CI. Until a **self-hosted runner inside the VNet** is configured, run
+> these checks **manually** from your laptop/jumpbox — in particular Layer 3
+> (`tests/Test-PostDeployHealth.ps1`) is a manual step after each deploy, not automatic.
+> The layer table documents the intended pipeline behavior for when that runner exists.
+
+The `.github/workflows/deploy.yml` pipeline is designed to run all of the above automatically, in three layers:
 
 | Layer | Job | When | Needs Azure? | What it covers |
 | --- | --- | --- | --- | --- |
 | 1. Config | `lint` + `config-tests` | every push / PR | no | `bicep build`, `bicep build-params`, [`actionlint`](https://github.com/rhysd/actionlint), `markdownlint`, DSC parse + PSScriptAnalyzer (`tests/Test-DscConfiguration.ps1`), bicepparam value invariants (`tests/Test-BicepParamValues.ps1`) |
-| 2. Pre-deploy | `pre-deploy-checks` | after `upload-artifacts`, before `what-if`/`deploy` | yes (read-only) | existing VNet/subnet present + has enough free IPs, Bastion subnet (if `deployBastion=true`), Key Vault is RBAC-enabled and cert is exportable + not expiring, `Configuration.zip` reachable via SAS, `az deployment group validate` (catches RBAC / policy errors that `what-if` masks) |
-| 3. Post-deploy | `post-deploy-tests` | after `deploy` succeeds on `main` | yes | every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, `gatewayFqdn` resolves, `https://<fqdn>/RDWeb/` returns 200 (soft-warn — the runner IP may not be in `allowedClientSourceAddressPrefixes`), vanity-CNAME (`publicGatewayFqdn`) resolves to the LB if different from the Azure-issued FQDN (soft-warn) |
+| 2. Pre-deploy | `pre-deploy-checks` | after `upload-artifacts`, before `what-if`/`deploy` | yes (read-only) | existing VNet/subnet present + has enough free IPs, Bastion subnet (if `deployBastion=true`), Key Vault is RBAC-enabled and cert is exportable + not expiring, `Configuration.zip` reachable via managed identity (`--auth-mode login`), `az deployment group validate` (catches RBAC / policy errors that `what-if` masks) |
+| 3. Post-deploy | `post-deploy-tests` | after `deploy` succeeds | yes | every VM extension `provisioningState=Succeeded`, per-VM Resource Health, LB backend pool health, `gatewayFqdn` resolves, `https://<fqdn>/RDWeb/` reachable (soft-warn — the deployer's IP may not be in `allowedClientSourceAddressPrefixes`), vanity-CNAME (`publicGatewayFqdn`) resolves to the LB if different from the Azure-issued FQDN (soft-warn) |
 
 The three test PowerShell scripts in CI also run standalone — and there are three more for local-only use:
 

@@ -77,6 +77,12 @@ Set-StrictMode -Version Latest
 $failures = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
 
+# Set when this host can't reach the Key Vault / storage data plane (private
+# endpoint only). Used for a consolidated "run from inside the VNet" note at the
+# end - the publish + deploy must run from a host with VNet line-of-sight.
+$script:kvDataPlaneBlocked = $false
+$script:saDataPlaneBlocked = $false
+
 function Write-TestResult {
     param([string]$Name, [bool]$Ok, [string]$Detail = '', [switch]$SoftWarn)
     if ($Ok) {
@@ -271,6 +277,7 @@ if (-not $certEnabled) {
             )
 
         if ($isBlockedByPolicy) {
+            $script:kvDataPlaneBlocked = $true
             Write-TestResult "Cert '$certNameFromUri' present in $kvName (inconclusive)" $false `
                 "Vault data-plane is not reachable from this host (public access disabled or RBAC not yet effective). The gateway VM will still reach the cert via its managed identity. URI: $kvSecretUri" -SoftWarn
         }
@@ -337,6 +344,7 @@ if (-not $artifactsSa) {
             $blobTxt -match 'Public access is not permitted' -or
             $blobTxt -match 'PublicAccessNotPermitted' -or
             $blobTxt -match 'public network access is disabled' -or
+            $blobTxt -match 'blocked by network rules' -or
             $blobTxt -match 'AuthorizationFailure' -or
             $blobTxt -match 'AuthorizationPermissionMismatch' -or
             $blobTxt -match 'This request is not authorized' -or
@@ -345,6 +353,7 @@ if (-not $artifactsSa) {
         )
 
     if ($isBlockedByPolicy) {
+        $script:saDataPlaneBlocked = $true
         Write-TestResult "Blob $artifactsContainer/$artifactsBlobName reachable from this host (inconclusive)" $false `
             "Storage data-plane is not reachable from this host (public access disabled or RBAC not yet effective). The VMs will still pull the artifact via their managed identity over the private endpoint. SA: $artifactsSa" -SoftWarn
     }
@@ -426,5 +435,26 @@ if ($warnings.Count -gt 0) {
     Write-Host "$($warnings.Count) warning(s):" -ForegroundColor Yellow
     $warnings | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
 }
+
+# Consolidated in-VNet reachability note. If the KV or SA data plane was
+# unreachable from this host, the cert/blob checks above could only soft-warn.
+# That's expected (and harmless) when you run this check from outside the VNet,
+# but the actual publish + deploy MUST run from a host that can reach those
+# private endpoints - a laptop on VPN or an in-VNet jumpbox. A GitHub-hosted
+# runner can't, which is why the pipeline needs a self-hosted runner in the VNet.
+if ($script:kvDataPlaneBlocked -or $script:saDataPlaneBlocked) {
+    $blocked = @()
+    if ($script:kvDataPlaneBlocked) { $blocked += 'Key Vault' }
+    if ($script:saDataPlaneBlocked) { $blocked += 'artifacts storage account' }
+    Write-Host ""
+    Write-Host "Network note: this host could not reach the $($blocked -join ' and ') data plane (private endpoint only)." -ForegroundColor Cyan
+    Write-Host "  - Fine if you ran this check from outside the VNet just to validate config." -ForegroundColor Cyan
+    Write-Host "  - But run Publish-DscArtifact.ps1 + Invoke-ManualDeploy.ps1 from a host WITH" -ForegroundColor Cyan
+    Write-Host "    VNet line-of-sight (laptop on VPN, or an in-VNet jumpbox). Uploading the DSC" -ForegroundColor Cyan
+    Write-Host "    artifact needs data-plane write to the private-endpoint-only storage account." -ForegroundColor Cyan
+    Write-Host "  - A GitHub-hosted runner can't reach these; the pipeline needs a self-hosted" -ForegroundColor Cyan
+    Write-Host "    runner inside the VNet." -ForegroundColor Cyan
+}
+
 Write-Host "All hard checks passed — safe to deploy." -ForegroundColor Green
 exit 0

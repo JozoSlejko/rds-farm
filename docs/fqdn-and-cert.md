@@ -148,10 +148,10 @@ The DNS label is registered as part of the deploy. Clients hit `<gatewayDnsLabel
 
 The **Key Vault VM extension** keeps the OS cert store on every RDS VM in sync with the latest version of `keyVaultCertSecretUri` (poll interval: 1 h by default). However, `Set-RDCertificate` is **only re-run during DSC apply**, so RDS keeps pointing at the old cert thumbprint until you trigger a DSC apply. Two options:
 
-1. **Re-run the pipeline** (`workflow_dispatch → deploy`). The DSC `BindRDSCertificates.TestScript` matches `Level=Trusted` certs by subject, so after a renewal the new thumbprint is bound on the next DSC apply. **This is the supported renewal path.**
-2. **Scheduled task on the broker** that runs `Set-RDCertificate` weekly (only if your security policy forbids `workflow_dispatch` against production).
+1. **Re-run the deploy** (`scripts/Invoke-ManualDeploy.ps1 -Action deploy`) from a laptop/jumpbox with VNet line-of-sight. The DSC `BindRDSCertificates.TestScript` matches the cert by **subject** (not trust level, so self-signed certs work too), so after a renewal the new thumbprint is bound on the next DSC apply. **This is the standard renewal path.**
+2. **Scheduled task on the broker** that runs `Set-RDCertificate` weekly (only if you'd rather not re-run a deploy for each renewal).
 
-CI's `pre-deploy-checks` job runs `az keyvault certificate show` on every push and fails the run if the active cert expires within 30 days — you get warned in plenty of time.
+[`tests/Test-PreDeployReadiness.ps1`](../tests/Test-PreDeployReadiness.ps1) runs `az keyvault certificate show` and warns if the active cert expires within 30 days — run it before each deploy to get warned in plenty of time.
 
 ---
 
@@ -188,9 +188,9 @@ $cert | Format-List Subject, DnsNameList, NotAfter
 
 ---
 
-## Doing it by hand (CI down, no orchestrator)
+## Doing it by hand (no orchestrator)
 
-If you can't run Tier 0 at all (rare — broken `gh` CLI, no Entra rights, etc.) and need the cert in Key Vault manually before deploying via the laptop escape hatch:
+If you can't run Tier 0 at all (rare — broken `gh` CLI, no Entra rights, etc.) and need the cert in Key Vault manually before deploying from a laptop/jumpbox:
 
 - **Manual cert creation in Key Vault** — verbose `az keyvault certificate` recipes for all three modes: [Manual deploy → Step 3: TLS certificate in Key Vault](./manual-deploy.md#3-create-the-tls-certificate-in-key-vault-only-if-tier-0-did-not).
 - **Manual bicepparam editing** of the cert / FQDN block: [Manual deploy → Step 4: edit main.bicepparam](./manual-deploy.md#4-edit-mainbicepparam).

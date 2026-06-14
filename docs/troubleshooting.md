@@ -21,10 +21,10 @@
 
 | Symptom | Cause / fix |
 | --- | --- |
-| DSC extension fails with `Cannot bind argument to parameter 'Url'` | `artifactsLocation` doesn't end with `/`, or `Configuration.zip` not at the root of the container. Re-run [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) to refresh both the URL and the SAS. |
+| DSC extension fails with `Cannot bind argument to parameter 'Url'` | `artifactsLocation` doesn't end with `/`, or `Configuration.zip` / `Bootstrap.ps1` not at the root of the container. Re-run [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) to refresh the artifacts and confirm the URL ends with `/`. (Downloads use the VM's managed identity — there is no SAS.) |
 | DSC extension downloads succeed, but `New-RDSessionDeployment` fails | Session host VM names don't match `<sessionHostNamingPrefix><NN>.<adDomainName>`. Make sure `sessionHostNamingPrefix` here is the same as the prefix used to name the RDSH VMs in `main.bicep`. |
-| Domain join fails | Wrong `adDnsServerIp`, NSG blocking DNS/LDAP/Kerberos, or service account lacks rights in the target OU. |
-| `pre-deploy-checks` job errors `Configuration.zip SAS unreachable (HTTP 403)` | SAS expired (the pipeline issues a 2 h SAS; re-run the workflow) or the storage account firewall blocks GitHub-hosted runners. Open the SA to "All networks" or move to a self-hosted runner. |
+| Domain join fails | Wrong `adDnsServerIp`, the subnet's governance NSG blocking outbound DNS/LDAP/Kerberos/SMB to the DC, or service account lacks rights in the target OU. |
+| `Configuration.zip` / `Bootstrap.ps1` unreachable, or `403` uploading or reading the DSC artifact | The artifacts SA is private-endpoint-only (public network access disabled) and access uses managed identity, not SAS. From **outside** the VNet the data plane is blocked — run [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) and the deploy from a host with VNet line-of-sight (laptop on VPN / in-VNet jumpbox). At apply time the VMs pull the blob via their user-assigned managed identity over the private endpoint, so the deploy itself doesn't need your host to reach the SA — only the upload does. |
 | `deploy` job error `quotaExceeded` for `standardDSv5Family` | Sub quota in the target region is below `sessionHostCount + 2`. Request an increase via Azure Portal → Quotas, or reduce `sessionHostCount`. |
 
 ## Common issues — Tier 2 (post-deploy, user-facing)
@@ -33,7 +33,7 @@
 | --- | --- |
 | `https://<publicGatewayFqdn>/RDWeb/` doesn't resolve | CNAME not yet created ([Manual deploy → Step 7a](./manual-deploy.md#7a-public-dns-cname-vanity-fqdn-only)) or TTL hasn't elapsed. |
 | Browser warns "the identity of this computer cannot be verified" | Cert SAN doesn't match the FQDN the user typed (Tier 0 cert mismatch), or you're on Option 1 (Azure LB FQDN) with a self-signed cert and haven't pushed it to the client's Trusted Root store. |
-| Health probe shows backend unhealthy | RD Gateway role not finished installing yet (give it ~15 min on first boot), or NSG blocking `AzureLoadBalancer` source tag. |
+| Health probe shows backend unhealthy | RD Gateway role not finished installing yet (give it ~15 min on first boot), or the subnet's governance NSG denies the `AzureLoadBalancer` service tag inbound — its default `AllowAzureLoadBalancerInBound` rule must stay in effect for the LB health probe to reach the gateway. |
 | User signed in but lands in the wrong session host pool | `rdsAccessGroup` membership change hasn't propagated. Log off / log on the user; or restart the broker (`Restart-Computer -ComputerName rds-cb-01`). |
 | CALs about to expire (broker event log 20 day warning) | Activate the license server in **RD Licensing Manager** and add the broker to the AD `Terminal Server License Servers` group. Required for the 120-day grace period to convert to permanent CALs. |
 

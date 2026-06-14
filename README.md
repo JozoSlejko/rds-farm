@@ -329,6 +329,7 @@ The README above is the deployment guide. For deeper reference on a specific are
 
 | Guide | Read this when… |
 | --- | --- |
+| [Deploy from scratch — runbook](docs/runbook.md) | **Start here.** One linear top-to-bottom walkthrough: empty subscription → working RD Web sign-in (prereqs → Tier 0 → laptop/jumpbox deploy → post-deploy). |
 | [Manual setup checklist](docs/manual-checklist.md) | You want a tickable / printable version of the [Deployment guide](#deployment-guide) above. |
 | [Prerequisite resources (Key Vault + storage)](docs/prereq-resources.md) | You want to provision the prereq Key Vault and DSC storage account automatically instead of pre-creating them by hand. |
 | [Gateway FQDN and TLS certificate](docs/fqdn-and-cert.md) | Deciding the public hostname (Azure LB vs vanity CNAME) and cert mode (Csr / ImportPfx / SelfSigned). Explains what Tier 0 does for each combination. |
