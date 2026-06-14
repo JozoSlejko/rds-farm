@@ -45,7 +45,7 @@ What the orchestrator does for you (each item below is FYI — you don't run the
 
 - [x] Pre-flight (`az` + `gh` auth, `az bicep` present, subscription set).
 - [x] Calls [`scripts/Initialize-CiPrerequisites.ps1`](../scripts/Initialize-CiPrerequisites.ps1) — Entra app + 4 federated credentials + RBAC + 5 GitHub repo secrets (`DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` prompted as `SecureString`) + `preview` / `production` environments. Auto-runs [`tests/Test-CiPrerequisites.ps1`](../tests/Test-CiPrerequisites.ps1).
-- [x] Deploys [`prereqs/main.bicep`](../prereqs/main.bicep) at subscription scope — `rds-artifacts-rg` + `rds-security-rg`, artifacts storage account, Key Vault. `adminPrincipals` pre-populated with `[you, CI service principal]`.
+- [x] Deploys [`prereqs/tier0.bicep`](../prereqs/tier0.bicep) at subscription scope — `rds-artifacts-rg` + `rds-security-rg`, artifacts storage account, Key Vault. `adminPrincipals` pre-populated with `[you, CI service principal]`.
 - [x] Calls [`scripts/New-RdsCertificate.ps1`](../scripts/New-RdsCertificate.ps1) in the chosen mode, enforces `exportable: true`, and patches the cert-related params in `main.bicepparam` via [`scripts/Set-BicepParamCertUri.ps1`](../scripts/Set-BicepParamCertUri.ps1).
 - [x] Patches the rest of `main.bicepparam` (VNet, AD, gateway, allowed CIDRs, artifactsLocation). Validates the file with `az bicep build-params` and restores from `.bak` on failure.
 - [x] Sets the `ARTIFACTS_STORAGE_ACCOUNT` GitHub repo variable to the SA the prereqs deployment produced.
@@ -67,7 +67,7 @@ After it finishes:
 - [ ] **Re-run with `action: deploy`** once you're happy with the plan. The `deploy` job runs (gated by the `production` environment) followed by `post-deploy-tests`.
 - [ ] **Inspect the workflow job summary** for `gatewayFqdn` and `rdWebUrl`. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1) automatically.
 
-> Changes to [`prereqs/main.bicep`](../prereqs/main.bicep) (admin principals, SA network ACL, etc.) are **not** redeployed by this workflow. Re-run [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) from a laptop to apply them.
+> Changes to [`prereqs/tier0.bicep`](../prereqs/tier0.bicep) (admin principals, SA network ACL, etc.) are **not** redeployed by this workflow. Re-run [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) from a laptop to apply them.
 
 Full reference: [CI/CD with GitHub Actions](./ci-cd.md).
 

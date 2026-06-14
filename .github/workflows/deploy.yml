@@ -25,8 +25,8 @@ env:
   ARTIFACTS_CONTAINER: dsc
   BICEP_FILE: main.bicep
   BICEPPARAM_FILE: main.bicepparam
-  PREREQS_BICEP_FILE: prereqs/main.bicep
-  PREREQS_BICEPPARAM_FILE: prereqs/main.bicepparam
+  PREREQS_BICEP_FILE: prereqs/tier0.bicep
+  PREREQS_BICEPPARAM_FILE: prereqs/tier0.bicepparam
 
 jobs:
   lint:
@@ -326,7 +326,7 @@ jobs:
           # The SA has allowSharedKeyAccess=false and tenant policy forbids SAS,
           # so we use OAuth via --auth-mode login. The CI SP has Storage Blob
           # Data Contributor on the SA (granted by the Tier 0 bootstrap when
-          # scripts/Initialize-RdsFarm.ps1 runs prereqs/main.bicep).
+          # scripts/Initialize-RdsFarm.ps1 runs prereqs/tier0.bicep).
           EXISTS=$(az storage blob exists \
             --account-name   "$ARTIFACTS_STORAGE_ACCOUNT" \
             --container-name "$ARTIFACTS_CONTAINER" \

@@ -16,11 +16,11 @@ A ready-to-use workflow is provided at [`.github/workflows/deploy.yml`](../.gith
 
 Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI.
 
-> The pipeline does not provision the artifacts storage account or Key Vault — those are Tier 0 prerequisites set up by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1). When you need to change `prereqs/main.bicep` (add an admin principal, tighten the SA's network ACL, etc.), re-run that script from your laptop.
+> The pipeline does not provision the artifacts storage account or Key Vault — those are Tier 0 prerequisites set up by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1). When you need to change `prereqs/tier0.bicep` (add an admin principal, tighten the SA's network ACL, etc.), re-run that script from your laptop.
 
 The pipeline:
 
-1. **`lint`** — compiles `main.bicep`, `main.bicepparam`, `prereqs/main.bicep`, and `prereqs/main.bicepparam` (the latter two are linted here even though the pipeline never deploys them, so Tier 0 doesn't ship broken Bicep).
+1. **`lint`** — compiles `main.bicep`, `main.bicepparam`, `prereqs/tier0.bicep`, and `prereqs/tier0.bicepparam` (the latter two are linted here even though the pipeline never deploys them, so Tier 0 doesn't ship broken Bicep).
 2. **`config-tests`** (no Azure) — runs [`actionlint`](https://github.com/rhysd/actionlint), [`markdownlint-cli2`](https://github.com/DavidAnson/markdownlint-cli2), [`tests/Test-DscConfiguration.ps1`](../tests/Test-DscConfiguration.ps1) (PSScriptAnalyzer + parse + Configuration discovery), and [`tests/Test-BicepParamValues.ps1`](../tests/Test-BicepParamValues.ps1) (no public-internet CIDRs, valid AD DNS IP, valid KV secret URI, hostnames ≤ 15 chars, etc.).
 3. **`package-dsc`** — zips `dsc/Configuration.ps1` → `Configuration.zip`.
 4. **`upload-artifacts`** — runs [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) which uploads the zip to the storage account named by the `ARTIFACTS_STORAGE_ACCOUNT` repo variable (set by Tier 0) using **`--auth-mode login`** (no account keys, no SAS — tenant policy forbids both). Outputs `artifacts_location` + `artifacts_storage_account` for downstream jobs via `needs.upload-artifacts.outputs.*`.

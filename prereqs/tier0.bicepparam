@@ -1,4 +1,4 @@
-using 'main.bicep'
+using 'tier0.bicep'
 
 // Region for the artifacts SA + Key Vault RGs. Tier 0
 // (scripts/Initialize-RdsFarm.ps1) overwrites this with your chosen

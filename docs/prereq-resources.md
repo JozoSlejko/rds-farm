@@ -5,7 +5,7 @@
 > [!NOTE]
 > **Where this fits in the tier model.** Running `prereqs/` is **Tier 0** (one-time provisioning) and is always done from a laptop — the CI pipeline never deploys this template:
 >
-> - **Via the orchestrator (recommended):** [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) deploys this template for you with `adminPrincipals` pre-populated. You don't edit `prereqs/main.bicepparam` at all.
+> - **Via the orchestrator (recommended):** [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) deploys this template for you with `adminPrincipals` pre-populated. You don't edit `prereqs/tier0.bicepparam` at all.
 > - **From your laptop directly:** [Option 2](#option-2--manual-az-deployment-sub-create) below — useful for debugging or when you can't use the orchestrator.
 >
 > After this is done once, every subsequent farm deploy is **Tier 1** (pipeline or laptop via [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1)) and reads the resources it just created. See [README → Deployment guide](../README.md#deployment-guide).
@@ -39,7 +39,7 @@ It also creates the two resource groups that hold them and grants `Storage Blob 
 | Role assignments | `Storage Blob Data Contributor` on the SA + `Key Vault Certificates Officer` on the vault for each item in `adminPrincipals` | Each entry must declare its principal type to avoid Graph-propagation flakiness |
 
 > [!WARNING]
-> **`enablePurgeProtection = true` is irreversible.** Once on, you cannot turn it off, and a deleted vault cannot be permanently purged for 90 days. Set `keyVaultEnablePurgeProtection = false` in [`prereqs/main.bicepparam`](../prereqs/main.bicepparam) for short-lived lab vaults you want to be able to recreate immediately.
+> **`enablePurgeProtection = true` is irreversible.** Once on, you cannot turn it off, and a deleted vault cannot be permanently purged for 90 days. Set `keyVaultEnablePurgeProtection = false` in [`prereqs/tier0.bicepparam`](../prereqs/tier0.bicepparam) for short-lived lab vaults you want to be able to recreate immediately.
 
 ## How to deploy
 
@@ -54,17 +54,17 @@ After it finishes, the pipeline reads the storage account from the repo variable
 ```powershell
 cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm\prereqs
 
-# Fill in your object IDs in main.bicepparam first (see below).
+# Fill in your object IDs in tier0.bicepparam first (see below).
 az deployment sub create `
   --name "prereqs-$(Get-Date -Format yyyyMMdd-HHmmss)" `
   --location westeurope `
-  --template-file main.bicep `
-  --parameters main.bicepparam
+  --template-file tier0.bicep `
+  --parameters tier0.bicepparam
 ```
 
-## Filling out `main.bicepparam`
+## Filling out `tier0.bicepparam`
 
-Open [`prereqs/main.bicepparam`](../prereqs/main.bicepparam) and set:
+Open [`prereqs/tier0.bicepparam`](../prereqs/tier0.bicepparam) and set:
 
 - `storageAccountName` — globally unique, 3–24 lowercase alphanumeric chars.
 - `keyVaultName` — globally unique, 3–24 chars. Skip if `deployKeyVault = false`.
@@ -84,7 +84,7 @@ az ad sp show --id <appId-from-gh-secret-AZURE_CLIENT_ID> --query id -o tsv
 ```
 
 > [!NOTE]
-> The CI pipeline auto-injects the CI service principal's object ID at runtime (`az ad sp show --id ${{ secrets.AZURE_CLIENT_ID }}`) so you don't have to hard-code it in source control. Hard-coding your own user/group IDs in `main.bicepparam` is still useful for manual `az deployment sub create` runs.
+> The CI pipeline auto-injects the CI service principal's object ID at runtime (`az ad sp show --id ${{ secrets.AZURE_CLIENT_ID }}`) so you don't have to hard-code it in source control. Hard-coding your own user/group IDs in `tier0.bicepparam` is still useful for manual `az deployment sub create` runs.
 
 ## RBAC the deploying principal needs
 

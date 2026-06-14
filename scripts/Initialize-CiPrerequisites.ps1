@@ -9,7 +9,7 @@
     deploy) and it will deploy main.bicep into the existing Tier 0 artifacts
     storage account + Key Vault. Provision those data resources from your
     laptop via Initialize-RdsFarm.ps1 (which calls this script and then
-    deploys prereqs/main.bicep).
+    deploys prereqs/tier0.bicep).
 
     What this script does (all idempotent):
       1. Creates (or reuses) an Entra application and service principal.
@@ -28,7 +28,7 @@
 
     What this script does NOT do (intentional):
       * Create the artifacts storage account / Key Vault / RGs — that is
-        what `prereqs/main.bicep` does. Run it via Initialize-RdsFarm.ps1
+        what `prereqs/tier0.bicep` does. Run it via Initialize-RdsFarm.ps1
         or by hand per docs/prereq-resources.md.
       * Create or import the TLS certificate — see docs/fqdn-and-cert.md.
 
@@ -318,7 +318,7 @@ if ($ArtifactsStorageAccount) {
     Set-GhVariable -Name 'ARTIFACTS_STORAGE_ACCOUNT' -Value $ArtifactsStorageAccount -Repo $GitHubRepo
 } else {
     Write-Host "  -ArtifactsStorageAccount not provided." -ForegroundColor Yellow
-    Write-Host "  Set this with the SA name produced by Initialize-RdsFarm.ps1 / prereqs/main.bicep" -ForegroundColor Yellow
+    Write-Host "  Set this with the SA name produced by Initialize-RdsFarm.ps1 / prereqs/tier0.bicep" -ForegroundColor Yellow
     Write-Host "  before you can trigger the deploy workflow." -ForegroundColor Yellow
 }
 
@@ -371,7 +371,7 @@ if (-not $SkipSelfCheck) {
     Write-Host "Service principal OID    : $SpObjectId"
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  1. Deploy prereqs/main.bicep from this laptop to create the artifacts SA + KV:"
+    Write-Host "  1. Deploy prereqs/tier0.bicep from this laptop to create the artifacts SA + KV:"
     Write-Host "        scripts/Initialize-RdsFarm.ps1   (recommended orchestrator)"
     Write-Host "     or follow docs/prereq-resources.md Option 2 (manual az deployment sub create)."
     Write-Host "  2. Set the ARTIFACTS_STORAGE_ACCOUNT repo variable to the new SA name:"

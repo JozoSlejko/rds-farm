@@ -177,7 +177,7 @@ if ($LASTEXITCODE -ne 0 -or -not $saName) {
     $sa = az storage account list --query "[?name=='$saName'] | [0]" -o json | ConvertFrom-Json
     if (-not $sa) {
         Write-TestResult "Storage account '$saName' exists in current sub" $false `
-            "Re-run scripts/Initialize-RdsFarm.ps1 (or prereqs/main.bicep manually) and update the variable."
+            "Re-run scripts/Initialize-RdsFarm.ps1 (or prereqs/tier0.bicep manually) and update the variable."
     } else {
         Write-TestResult "Storage account '$saName' exists in current sub" $true
     }

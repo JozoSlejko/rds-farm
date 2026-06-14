@@ -217,7 +217,7 @@ git push
 | `workflow_dispatch → action: what-if` | `lint → config-tests → upload-artifacts → pre-deploy-checks → what-if`. The what-if diff is written to the run's job summary. |
 | `workflow_dispatch → action: deploy` | All of the above plus `deploy` (gated by the `production` environment) and `post-deploy-tests`. |
 
-> The pipeline is **manual-trigger only** — it does not run on commit, push, or pull request. Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI. The pipeline never (re)deploys [`prereqs/main.bicep`](prereqs/main.bicep) — that's a Tier 0 laptop-only operation, driven by [`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1).
+> The pipeline is **manual-trigger only** — it does not run on commit, push, or pull request. Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI. The pipeline never (re)deploys [`prereqs/tier0.bicep`](prereqs/tier0.bicep) — that's a Tier 0 laptop-only operation, driven by [`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1).
 
 Typical wall-clock time on `Standard_D4s_v5`: **25–40 min**. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](tests/Test-PostDeployHealth.ps1) and confirms every VM extension succeeded, LB backend is healthy, DNS resolves, and `https://<gatewayFqdn>/RDWeb/` returns 200. Full CI/CD reference: [`docs/ci-cd.md`](docs/ci-cd.md). What the deploy actually does to the VMs (Bicep + DSC, 12 steps): [`docs/manual-deploy.md`](docs/manual-deploy.md#what-the-deployment-does-end-to-end). Test details: [`docs/testing.md`](docs/testing.md).
 
@@ -277,8 +277,8 @@ rds-farm/
 │   ├── identity.bicep          # user-assigned MSI for cert flow
 │   └── kv-role.bicep           # role assignment on existing Key Vault
 ├── prereqs/                    # OPTIONAL — provision the Key Vault + DSC storage account
-│   ├── main.bicep              # subscription-scope entry point
-│   ├── main.bicepparam
+│   ├── tier0.bicep             # subscription-scope entry point (Tier 0)
+│   ├── tier0.bicepparam
 │   └── modules/
 │       ├── keyvault.bicep
 │       └── storage.bicep

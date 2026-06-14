@@ -14,7 +14,7 @@
          as GitHub repo secrets — never written to disk).
       3. Runs scripts/Initialize-CiPrerequisites.ps1 to create the Entra
          app + federated credentials + RBAC + GitHub secrets/environments.
-      4. Deploys prereqs/main.bicep to provision the artifacts storage
+      4. Deploys prereqs/tier0.bicep to provision the artifacts storage
          account and the Key Vault, with adminPrincipals = [you, the CI SP].
       5. Runs scripts/New-RdsCertificate.ps1 to create / import the TLS cert
          in the new Key Vault and patch the cert-related params in
@@ -723,7 +723,7 @@ Write-Host "    Bicepparam   : $BicepParamFile"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $initCi   = Join-Path $PSScriptRoot 'Initialize-CiPrerequisites.ps1'
 $newCert  = Join-Path $PSScriptRoot 'New-RdsCertificate.ps1'
-$prereqs  = Join-Path $repoRoot 'prereqs\main.bicep'
+$prereqs  = Join-Path $repoRoot 'prereqs\tier0.bicep'
 foreach ($p in @($initCi, $newCert, $prereqs)) {
     if (-not (Test-Path -LiteralPath $p)) { throw "Required file missing: $p" }
 }
@@ -1157,7 +1157,7 @@ $artifactsLocationUrl = "https://$ArtifactsStorageAccount.blob.core.windows.net/
 
 if (-not $SkipPrereqsDeploy) {
     Write-Host ""
-    Write-Host "==> Step 4: Provision prereqs (prereqs/main.bicep)" -ForegroundColor Green
+    Write-Host "==> Step 4: Provision prereqs (prereqs/tier0.bicep)" -ForegroundColor Green
 
     $adminPrincipals = @(
         @{ id = $myObjectId;   type = 'User'             }
