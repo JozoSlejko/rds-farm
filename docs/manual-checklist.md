@@ -11,7 +11,7 @@
 | --- | --- |
 | **Prerequisites** | Lives outside Azure (AD, networking, DNS). No script can create these for you. |
 | **Tier 0** | One-time bootstrap on your laptop. Driven by a single orchestrator script. |
-| **Tier 1** | Runs every time you change code. **Pipeline** is the supported path; laptop wrapper is an escape hatch. |
+| **Tier 1** | Runs every time you change code. Deploy from a **laptop/jumpbox with VNet line-of-sight** — the GitHub-hosted pipeline can't reach the private-endpoint-only KV/SA. |
 | **Tier 2** | Ad-hoc post-deploy operations. |
 
 ---
@@ -61,23 +61,24 @@ After it finishes:
 
 ## Tier 1 — Deploy
 
-### Pipeline (supported path)
+### Pipeline (blocked today — needs an in-VNet runner)
 
-- [ ] **Run the workflow manually** \u2014 `Actions \u2192 Deploy RDS Farm \u2192 Run workflow` with `action: what-if`. Review the resource diff in the run's job summary.
-- [ ] **Re-run with `action: deploy`** once you're happy with the plan. The `deploy` job runs (gated by the `production` environment) followed by `post-deploy-tests`.
-- [ ] **Inspect the workflow job summary** for `gatewayFqdn` and `rdWebUrl`. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](../tests/Test-PostDeployHealth.ps1) automatically.
+The GitHub Actions workflow runs the same `main.bicep` / `main.bicepparam` flow, but a GitHub-hosted runner is outside the VNet and can't reach the private-endpoint-only KV/SA during pre-deploy checks, so it fails. It becomes usable once a **self-hosted runner inside the VNet** is configured. Until then, use the laptop / jumpbox path below.
 
 > Changes to [`prereqs/tier0.bicep`](../prereqs/tier0.bicep) (admin principals, SA network ACL, etc.) are **not** redeployed by this workflow. Re-run [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) from a laptop to apply them.
 
 Full reference: [CI/CD with GitHub Actions](./ci-cd.md).
 
-### Escape hatch — laptop deploy (only when CI is unavailable)
+### Laptop / jumpbox deploy (the working path today)
+
+Run from a machine with line-of-sight to the VNet (laptop on VPN, or a jumpbox in a peered network). The artifacts SA and Key Vault are private-endpoint-only, so the deployer must be able to reach them.
 
 - [ ] **Pre-flight:** `./tests/Test-PreDeployReadiness.ps1` (exits 1 on any FAIL).
 - [ ] **Preview:** `./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount <sa>`
 - [ ] **Apply:** `./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount <sa>`
+- [ ] **Run post-deploy smoke tests:** `./tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg`.
 
-The wrapper packages DSC, uploads it via `--auth-mode login`, prompts for `DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` if missing, and runs `what-if` + `create`. The DSC extension reads the blob back at apply-time with the VMs' user-assigned managed identity (no SAS — tenant policy forbids it). Equivalent broken-down `az` commands: [Manual deploy (escape hatch)](./manual-deploy.md).
+The wrapper packages DSC (`Configuration.zip` + `Bootstrap.ps1`), uploads it via `--auth-mode login`, prompts for `DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` if missing, and runs `what-if` + `create`. The DSC extension reads the blobs back at apply-time with the VMs' user-assigned managed identity (no SAS — tenant policy forbids it). Equivalent broken-down `az` commands: [Manual deploy](./manual-deploy.md).
 
 ---
 

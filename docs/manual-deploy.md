@@ -1,15 +1,23 @@
-# Manual deploy (Tier 1 escape hatch)
+# Manual deploy (laptop / jumpbox)
 
 [← Back to main README](../README.md)
 
 > [!IMPORTANT]
-> **Use the pipeline.** The supported deploy path is [CI/CD with GitHub Actions](./ci-cd.md) — run **Actions → Deploy RDS Farm → Run workflow** to launch `what-if` or `deploy` on demand. This page documents the same `main.bicep` / `main.bicepparam` flow as a **Tier 1 alternative** for the handful of cases where CI isn't an option:
+> **This is the working deploy path today.** The GitHub Actions pipeline can't
+> complete from GitHub-hosted runners: the artifacts storage account and Key
+> Vault are private-endpoint-only (public network access disabled), and a
+> GitHub-hosted runner sits **outside** the VNet, so the pre-deploy checks
+> (blob reachability, Key Vault cert read, `az deployment group validate`) fail.
+> Until a **self-hosted runner inside the VNet** is configured, deploy from a
+> machine that has line-of-sight to the VNet — a laptop on VPN, or a jumpbox in
+> a peered network — using the steps on this page.
 >
-> - CI is temporarily unavailable (workflow disabled, GitHub outage).
-> - You're iterating on `main.bicep` or `dsc/Configuration.ps1` and want a fast local loop.
-> - You don't have repo write access to wire up GitHub Actions yet.
->
-> If none of those apply, close this page and `git push` instead. The pipeline supplies the three CI-injected values (`domainJoinPassword`, `localAdminPassword`, `artifactsLocation`); the laptop path asks you for them at runtime.
+> This is the same `main.bicep` / `main.bicepparam` flow the pipeline would run.
+> The three values the pipeline injects (`domainJoinPassword`,
+> `localAdminPassword`, `artifactsLocation`) are supplied here from your shell
+> (steps 1–2). For the one-command wrapper that bundles it all, see
+> [`scripts/Invoke-ManualDeploy.ps1`](../scripts/Invoke-ManualDeploy.ps1) in the
+> TIP below.
 
 See [README → Deployment guide](../README.md#deployment-guide) for the bigger picture.
 
@@ -25,12 +33,12 @@ From a clean run — pipeline or laptop — the template performs the following 
 | 2 | Set NIC DNS → your existing DC IP (`adDnsServerIp`) | VM NIC | Bicep (`dnsSettings.dnsServers`) |
 | 3 | **Domain-join every VM** to your existing AD | VM | `JsonADDomainExtension` v1.3 (`Options: 3`) |
 | 4 | Install RDS roles (`RDS-Gateway`, `RDS-Web-Access`, `RPC-over-HTTP-Proxy`, `RDS-Connection-Broker`, `RDS-Licensing`, `RDS-RD-Server`, RSAT) | VM | DSC `WindowsFeature` resources |
-| 5 | `New-RDSessionDeployment` (broker + web access + session hosts) | Broker | DSC `Script CreateRDSDeployment` |
-| 6 | `Add-RDServer -Role RDS-GATEWAY -GatewayExternalFqdn <publicGatewayFqdn>` | Broker | same script |
-| 7 | `Add-RDServer -Role RDS-LICENSING` + `Set-RDLicenseConfiguration -Mode PerUser` (120-day grace) | Broker | same script |
-| 8 | `Set-RDDeploymentGatewayConfiguration` — force traffic through gateway, cache RD Web creds | Broker | same script |
-| 9 | `New-RDSessionCollection` (default `DesktopCollection`) | Broker | same script |
-| 10 | `Set-RDSessionCollectionConfiguration -UserGroup <netbios>\<rdsAccessGroup>` | Broker | same script |
+| 5 | `New-RDSessionDeployment` (broker + web access + session hosts) | Broker | DSC `Script Rds01_BootstrapDeployment` |
+| 6 | `Add-RDServer -Role RDS-GATEWAY -GatewayExternalFqdn <publicGatewayFqdn>` | Broker | DSC `Script Rds02_AddGatewayRole` |
+| 7 | `Add-RDServer -Role RDS-LICENSING` + `Set-RDLicenseConfiguration -Mode PerUser` (120-day grace) | Broker | DSC `Script Rds03_AddLicensingRole` |
+| 8 | `Set-RDDeploymentGatewayConfiguration` — force traffic through gateway, cache RD Web creds | Broker | DSC `Script Rds04_GatewayConfig` |
+| 9 | `New-RDSessionCollection` (default `DesktopCollection`) | Broker | DSC `Script Rds05_CreateCollection` |
+| 10 | `Set-RDSessionCollectionConfiguration -UserGroup <netbios>\<rdsAccessGroup>` | Broker | DSC `Script Rds06_RestrictCollectionUsers` |
 | 11 | **Create default RD CAP + RAP scoped to `rdsAccessGroup`** so the gateway actually accepts sessions | Gateway | DSC `Script ConfigureRDGatewayPolicies` (uses `RDS:\GatewayServer` PSDrive) |
 | 12 | Optional: pull TLS cert from Key Vault → `Set-RDCertificate` for all 4 roles | Broker | KV VM extension + DSC `Script BindRDSCertificates` |
 
@@ -53,23 +61,23 @@ After step 12 returns success, opening `https://<publicGatewayFqdn>/RDWeb/` from
 
 ## 1. Package and upload DSC artifacts
 
-Use [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) — the same script the pipeline calls. It zips `dsc/Configuration.ps1` and uploads via `az storage blob upload --auth-mode login` (no account keys, no SAS):
+Use [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1) — the same script the pipeline calls. It zips `dsc/Configuration.ps1` into `Configuration.zip`, uploads it **and** `dsc/Bootstrap.ps1` via `az storage blob upload --auth-mode login` (no account keys, no SAS). The Custom Script Extension downloads **both** blobs side-by-side, so both must be present:
 
 ```powershell
-cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm
+cd <path-to-rds-farm-repo>
 
 $result = ./scripts/Publish-DscArtifact.ps1 `
   -StorageAccount contosoartifactssa `
   -Container dsc
-# $result has .ArtifactsLocation (URL ending /) and .BlobUrl
+# $result has .ArtifactsLocation (URL ending /), .BlobUrl, .BootstrapBlobUrl
 
 $env:ARTIFACTS_LOCATION        = $result.ArtifactsLocation
 $env:ARTIFACTS_STORAGE_ACCOUNT = 'contosoartifactssa'   # consumed by the readiness test
 ```
 
-The DSC extension reads the blob back at apply-time using the VM's user-assigned managed identity (Storage Blob Data Reader on the SA, granted by [`modules/sa-role.bicep`](../modules/sa-role.bicep)). The artifacts SA has `allowSharedKeyAccess: false` and tenant policy forbids SAS, so MSI auth is the only viable path.
+The DSC extension reads the blobs back at apply-time using the VM's user-assigned managed identity (Storage Blob Data Reader on the SA, granted by [`modules/sa-role.bicep`](../modules/sa-role.bicep)). The artifacts SA has `allowSharedKeyAccess: false` and tenant policy forbids SAS, so MSI auth is the only viable path.
 
-If you'd rather run the underlying `az` commands by hand, they are:
+If you'd rather run the underlying `az` commands by hand, they are — note you must upload **both** `Configuration.zip` and `Bootstrap.ps1`:
 
 ```powershell
 Compress-Archive -Path .\dsc\Configuration.ps1 -DestinationPath .\Configuration.zip -Force
@@ -81,7 +89,16 @@ az storage blob upload `
   --file .\Configuration.zip `
   --auth-mode login --overwrite
 
-# Verify (also what the pre-deploy-checks job runs):
+# Bootstrap.ps1 is the CSE entry point — it MUST be uploaded too, or the
+# extension fails with "Configuration.zip not found next to Bootstrap.ps1".
+az storage blob upload `
+  --account-name contosoartifactssa `
+  --container-name dsc `
+  --name Bootstrap.ps1 `
+  --file .\dsc\Bootstrap.ps1 `
+  --auth-mode login --overwrite
+
+# Verify both exist (the readiness test checks Configuration.zip):
 az storage blob exists `
   --account-name contosoartifactssa `
   --container-name dsc `
@@ -347,7 +364,7 @@ Full list of every parameter and its source: [README → Parameters reference](.
 ## 5. Deploy
 
 ```powershell
-cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm
+cd <path-to-rds-farm-repo>
 
 az group create -n rds-farm-rg -l westeurope
 

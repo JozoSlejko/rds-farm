@@ -108,4 +108,4 @@ You can pre-create the two resource groups out of band and grant the deployer on
 
 2. **Create or import the TLS cert.** Follow [Manual deploy → Step 3](./manual-deploy.md#3-create-the-tls-certificate-in-key-vault-only-if-tier-0-did-not) — Step 3a (RBAC mode + self-grant Certificates Officer) is already handled by this template.
 3. **Update `main.bicepparam`.** Set `keyVaultName`, `keyVaultResourceGroup`, and `keyVaultCertSecretUri` (the value the orchestrator prints in its summary).
-4. **Run the main farm deploy.** Either trigger the workflow with `action: deploy`, or `az deployment group create` manually per [Manual deploy (escape hatch)](./manual-deploy.md).
+4. **Run the main farm deploy.** From a laptop/jumpbox with VNet line-of-sight, run `az deployment group create` (or `scripts/Invoke-ManualDeploy.ps1`) per [Manual deploy](./manual-deploy.md).

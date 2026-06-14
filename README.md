@@ -47,7 +47,7 @@ flowchart TB
 
 ## Deployment guide
 
-The flow is **prerequisites → Tier 0 → Tier 1 → Tier 2**. The pipeline is the supported deploy path; a laptop "escape hatch" exists for when CI is unavailable but it isn't a parallel workflow you have to maintain.
+The flow is **prerequisites → Tier 0 → Tier 1 → Tier 2**. Tier 1 (the actual farm deploy) runs from a laptop or jumpbox with line-of-sight to the VNet — see the note below on why the GitHub Actions pipeline can't run it today.
 
 ```mermaid
 flowchart LR
@@ -59,9 +59,9 @@ flowchart LR
         direction TB
         BS["scripts/Initialize-RdsFarm.ps1<br/>→ CI wiring (Entra app, GH secrets, envs)<br/>→ Prereq Azure (KV + storage SA)<br/>→ TLS cert in Key Vault<br/>→ Patches main.bicepparam<br/>→ Sets ARTIFACTS_STORAGE_ACCOUNT var"]
     end
-    subgraph T1["Tier 1 — Deploy (every change, pipeline)"]
+    subgraph T1["Tier 1 — Deploy (every change, laptop/jumpbox in-VNet)"]
         direction TB
-        WF[".github/workflows/deploy.yml<br/>PR → what-if · merge → deploy<br/>Escape hatch: Invoke-ManualDeploy.ps1"]
+        WF["scripts/Invoke-ManualDeploy.ps1<br/>package DSC → upload (MSI) → pre-flight<br/>→ what-if → deploy → post-deploy tests"]
     end
     subgraph T2["Tier 2 — Post-deploy (ad-hoc, manual)"]
         direction TB
@@ -75,11 +75,19 @@ flowchart LR
 | --- | --- | --- | --- |
 | **Prerequisites** | Before anything | AD / network / DNS — outside Azure | Things this repo can't create for you (AD account + group, VNet + subnet, client CIDRs, hostname plan). |
 | **Tier 0 — Bootstrap** | Once, before first deploy | Your laptop | One script ([`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1)) does it all: GitHub Actions wiring, Azure prereq RGs/KV/SA, TLS cert, fully patched `main.bicepparam`. |
-| **Tier 1 — Deploy** | Every code change | **GitHub Actions pipeline** (escape hatch: laptop) | `package DSC → upload → SAS → pre-flight → what-if → deploy → post-deploy tests`. |
+| **Tier 1 — Deploy** | Every code change | **Laptop / jumpbox with VNet line-of-sight** | `package DSC → upload (MSI) → pre-flight → what-if → deploy → post-deploy tests`. |
 | **Tier 2 — Post-deploy** | Ad-hoc | Your laptop | Public CNAME, RDS CALs activation, AD `Terminal Server License Servers` membership, smoke tests, tear-down. |
 
 > [!NOTE]
-> **Pipeline is the supported deploy path.** Tier 0 always wires up GitHub Actions because every change is meant to flow through PR-with-what-if → merge-to-deploy. The laptop wrapper [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) exists as a one-off escape hatch (e.g. CI is down, or you're debugging the Bicep itself); it reads the **same** `main.bicepparam` and calls the **same** [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1) the workflow does, so the two paths can't drift.
+> **Deploy from inside the VNet (laptop on VPN or a jumpbox).** The artifacts
+> storage account and Key Vault are private-endpoint-only (public network access
+> disabled). The GitHub-hosted pipeline runner sits outside the VNet, so its
+> pre-deploy checks (blob reachability, Key Vault cert read, `az deployment group
+> validate`) can't reach those resources and the run fails. Until a **self-hosted
+> runner inside the VNet** is set up, run [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1)
+> from a machine with line-of-sight to the VNet. It packages DSC via
+> [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), runs the
+> readiness gate, then `what-if` + `create`. Full steps: [`docs/manual-deploy.md`](docs/manual-deploy.md).
 
 For a printable / tickable version of the steps below, see [`docs/manual-checklist.md`](docs/manual-checklist.md).
 
@@ -202,28 +210,31 @@ The values below are baked into [`main.bicepparam`](main.bicepparam) during Tier
 | `publicGatewayFqdn` | only if cert binding (recommended) | file | Public hostname clients type. Wired into RD Gateway's `GatewayExternalFqdn` and the `rdWebUrl` output. Leave empty to use the LB FQDN (lab / dev only — see [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md)). |
 | `certificateSubject` | only if cert binding | file | Subject substring to locate the cert (e.g. `CN=rds.contoso.com`). |
 
-### Tier 1 — Deploy (pipeline)
+### Tier 1 — Deploy (laptop / jumpbox)
 
-After Tier 0 finishes, commit `main.bicepparam` and push:
+After Tier 0 finishes, commit `main.bicepparam` so the config is version-controlled:
 
 ```powershell
 git add main.bicepparam
 git commit -m 'Initialize farm config'
-git push
 ```
 
-| Trigger | What runs |
-| --- | --- |
-| `workflow_dispatch → action: what-if` | `lint → config-tests → upload-artifacts → pre-deploy-checks → what-if`. The what-if diff is written to the run's job summary. |
-| `workflow_dispatch → action: deploy` | All of the above plus `deploy` (gated by the `production` environment) and `post-deploy-tests`. |
+Then deploy from a machine with line-of-sight to the VNet — a laptop on VPN, or a jumpbox in a peered network (see the note below on why a GitHub-hosted runner can't do this):
 
-> The pipeline is **manual-trigger only** — it does not run on commit, push, or pull request. Run it from **Actions → Deploy RDS Farm → Run workflow** in the GitHub UI. The pipeline never (re)deploys [`prereqs/tier0.bicep`](prereqs/tier0.bicep) — that's a Tier 0 laptop-only operation, driven by [`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1).
+```powershell
+# Preview the change
+./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount <artifactsSA>
 
-Typical wall-clock time on `Standard_D4s_v5`: **25–40 min**. The `post-deploy-tests` job runs [`tests/Test-PostDeployHealth.ps1`](tests/Test-PostDeployHealth.ps1) and confirms every VM extension succeeded, LB backend is healthy, DNS resolves, and `https://<gatewayFqdn>/RDWeb/` returns 200. Full CI/CD reference: [`docs/ci-cd.md`](docs/ci-cd.md). What the deploy actually does to the VMs (Bicep + DSC, 12 steps): [`docs/manual-deploy.md`](docs/manual-deploy.md#what-the-deployment-does-end-to-end). Test details: [`docs/testing.md`](docs/testing.md).
+# Apply
+./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount <artifactsSA>
+```
 
-#### Escape hatch — laptop deploy
+The wrapper packages DSC via [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), runs the [`tests/Test-PreDeployReadiness.ps1`](tests/Test-PreDeployReadiness.ps1) gate, then `az deployment group what-if` and `create`. It prompts for `DOMAIN_JOIN_PASSWORD` / `LOCAL_ADMIN_PASSWORD` if they aren't already in your shell. Full step-by-step, plus the by-hand `az` equivalents: [`docs/manual-deploy.md`](docs/manual-deploy.md).
 
-Use this **only** when CI is unavailable (workflow disabled / GitHub outage) or when you're iterating on the Bicep itself. It reads the same `main.bicepparam`, calls the same [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), automatically runs the same [`tests/Test-PreDeployReadiness.ps1`](tests/Test-PreDeployReadiness.ps1) gate as the pipeline's `pre-deploy-checks` job, and runs the same `az deployment group what-if` / `create`. The only thing it bypasses is the workflow's environment approval gate.
+Typical wall-clock time on `Standard_D4s_v5`: **25–40 min** (VM provisioning + domain-join reboot + DSC role install + RDS deployment). Afterwards run [`tests/Test-PostDeployHealth.ps1`](tests/Test-PostDeployHealth.ps1) to confirm every VM extension succeeded, the LB backend is healthy, DNS resolves, and `https://<gatewayFqdn>/RDWeb/` is reachable. What the deploy actually does to the VMs (Bicep + DSC, 12 steps): [`docs/manual-deploy.md`](docs/manual-deploy.md#what-the-deployment-does-end-to-end). Test details: [`docs/testing.md`](docs/testing.md).
+
+> [!NOTE]
+> **Why not the GitHub Actions pipeline?** The artifacts storage account and Key Vault are private-endpoint-only (public network access disabled). A GitHub-hosted runner sits outside the VNet, so the pipeline's pre-deploy checks (blob reachability, Key Vault cert read, `az deployment group validate`) can't reach those resources and the run fails. The workflow and its reference ([`docs/ci-cd.md`](docs/ci-cd.md)) are kept for when a **self-hosted runner inside the VNet** is configured — until then, deploy from a laptop/jumpbox as above. The pipeline reads the **same** `main.bicepparam` and calls the **same** [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), so the two paths stay in sync.
 
 ```powershell
 # Preview only (artifacts get published; readiness checks run; deployment is what-if)
@@ -301,7 +312,7 @@ rds-farm/
 │   ├── Initialize-RdsFarm.ps1          # Tier-0 ORCHESTRATOR — calls the four below in order
 │   ├── Initialize-CiPrerequisites.ps1  # Tier-0: Entra app + federated creds + RBAC + GitHub secrets
 │   ├── Publish-DscArtifact.ps1         # zip + upload Configuration.zip (--auth-mode login, no SAS)
-│   ├── Invoke-ManualDeploy.ps1         # Tier-1 laptop escape hatch (no CI required)
+│   ├── Invoke-ManualDeploy.ps1         # Tier-1 laptop/jumpbox deploy (the working path)
 │   ├── New-RdsCertificate.ps1          # create/import TLS cert in Key Vault (CSR/PFX/SelfSigned)
 │   ├── Set-BicepParamCertUri.ps1       # patch cert-related params in main.bicepparam in place
 │   ├── Set-GatewayCname.ps1            # Tier-2: set vanity-FQDN CNAME in Azure DNS (idempotent)
@@ -321,7 +332,7 @@ The README above is the deployment guide. For deeper reference on a specific are
 | [Manual setup checklist](docs/manual-checklist.md) | You want a tickable / printable version of the [Deployment guide](#deployment-guide) above. |
 | [Prerequisite resources (Key Vault + storage)](docs/prereq-resources.md) | You want to provision the prereq Key Vault and DSC storage account automatically instead of pre-creating them by hand. |
 | [Gateway FQDN and TLS certificate](docs/fqdn-and-cert.md) | Deciding the public hostname (Azure LB vs vanity CNAME) and cert mode (Csr / ImportPfx / SelfSigned). Explains what Tier 0 does for each combination. |
-| [Manual deploy (escape hatch)](docs/manual-deploy.md) | What the deployment does end-to-end (12 steps), plus the underlying `az` commands for cert creation, bicepparam editing, deploy, and CNAME — when CI is unavailable. |
+| [Manual deploy](docs/manual-deploy.md) | The working deploy path (laptop/jumpbox with VNet line-of-sight). What the deployment does end-to-end (12 steps), plus the underlying `az` commands for cert creation, bicepparam editing, deploy, and CNAME. |
 | [CI/CD with GitHub Actions](docs/ci-cd.md) | Wiring up the included `.github/workflows/deploy.yml` (OIDC federated creds, RBAC, env approval). |
 | [Testing & verification](docs/testing.md) | Five-stage smoke tests from pre-deploy `what-if` to end-to-end client RDP. |
 | [Troubleshooting](docs/troubleshooting.md) | "Why doesn't this work?" — failures grouped by tier with the most likely fix. |
