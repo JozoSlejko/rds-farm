@@ -53,6 +53,9 @@ param windowsSku string = '2022-datacenter-azure-edition'
 @description('CIDR(s) allowed to reach RD Gateway from the internet (HTTPS/UDP 3391). Use your office/VPN egress IPs only.')
 param allowedClientSourceAddressPrefixes array
 
+@description('Name of the governance NSG already attached to the RDS subnet (landing-zone / Azure Policy managed), co-located in existingVnetResourceGroup. The farm writes the client allow-list (TCP 443 / UDP 3391) as named rules on this NSG instead of attaching its own NIC NSG. Tier 0 discovers and sets this. Leave empty to skip writing rules.')
+param subnetNsgName string = ''
+
 @description('DNS label prefix for the gateway public IP. Final FQDN: <prefix>.<region>.cloudapp.azure.com')
 param gatewayDnsLabelPrefix string
 
@@ -117,9 +120,7 @@ module network 'modules/network.bicep' = {
     vnetName: existingVnetName
     rdsSubnetName: existingRdsSubnetName
     allowedClientSourceAddressPrefixes: allowedClientSourceAddressPrefixes
-    namePrefix: namePrefix
-    location: location
-    tags: tags
+    subnetNsgName: subnetNsgName
   }
 }
 
@@ -176,7 +177,6 @@ module gatewayVm 'modules/vm.bicep' = {
     vmSize: vmSize
     windowsSku: windowsSku
     subnetId: network.outputs.rdsSubnetId
-    nsgId: network.outputs.nsgId
     backendPoolId: loadbalancer.outputs.backendPoolId
     adDnsServerIp: adDnsServerIp
     localAdminUserName: localAdminUserName
@@ -202,7 +202,6 @@ module brokerVm 'modules/vm.bicep' = {
     vmSize: vmSize
     windowsSku: windowsSku
     subnetId: network.outputs.rdsSubnetId
-    nsgId: network.outputs.nsgId
     adDnsServerIp: adDnsServerIp
     localAdminUserName: localAdminUserName
     localAdminPassword: localAdminPassword
@@ -227,7 +226,6 @@ module sessionHosts 'modules/vm.bicep' = [for i in range(0, sessionHostCount): {
     vmSize: vmSize
     windowsSku: windowsSku
     subnetId: network.outputs.rdsSubnetId
-    nsgId: network.outputs.nsgId
     adDnsServerIp: adDnsServerIp
     localAdminUserName: localAdminUserName
     localAdminPassword: localAdminPassword

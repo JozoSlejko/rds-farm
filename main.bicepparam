@@ -16,6 +16,11 @@ using 'main.bicep'
 param existingVnetName = 'j-rdsvnet-01'
 param existingVnetResourceGroup = 'rg-j-rdsvnet-01'
 param existingRdsSubnetName = 'rds'
+// Governance NSG already attached to the RDS subnet (landing-zone / Azure Policy
+// managed). The farm writes its client allow-list (TCP 443 / UDP 3391) as named
+// rules here instead of attaching its own NIC NSG. Tier 0 discovers and sets it.
+// Leave empty to skip writing rules.
+param subnetNsgName = 'j-rdsvnet-01-rds-nsg-italynorth'
 param adDomainName = 'slejco.com'
 param adDnsServerIp = '172.16.0.4'
 param domainJoinUserName = 'svc-domainjoin'

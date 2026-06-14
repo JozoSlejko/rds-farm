@@ -17,8 +17,7 @@
       4. gatewayFqdn DNS resolves.
       5. https://<gatewayFqdn>/RDWeb/ returns 200 (soft warn if this machine's
          public IP isn't in allowedClientSourceAddressPrefixes, or the gateway
-         is still warming up). Pass -AddClientIpToNsg to temporarily open the
-         NSG to this machine's public IP for the duration of this one check.
+         is still warming up).
       6. If publicGatewayFqdn differs from gatewayFqdn, DNS for the vanity
          hostname is also checked.
 
@@ -36,26 +35,13 @@
     deploys via Invoke-ManualDeploy.ps1 are named '<name>-<timestamp>'. Pass an
     explicit name to target one specific deployment and skip auto-selection.
 
-.PARAMETER AddClientIpToNsg
-    Optional switch. Before the RD Web check, detect this machine's public
-    IPv4 and add a temporary inbound TCP-443 allow rule for that /32 to the
-    farm NSG, then remove the rule once the check finishes (always, via a
-    finally block). Use it to get a green RD Web result from a host that isn't
-    in allowedClientSourceAddressPrefixes. The rule is a SEPARATE, clearly
-    named slot - it never touches the IaC-managed 'Allow-HTTPS-from-AllowedClients'
-    rule - and is temporary by design: the next deployment reconciles the NSG
-    back to allowedClientSourceAddressPrefixes, so for DURABLE access add the
-    IP to that parameter and redeploy instead. Requires write access to the
-    NSG (Network Contributor on the farm resource group).
-
 .EXAMPLE
     pwsh -File tests/Test-PostDeployHealth.ps1 -ResourceGroupName rds-farm-rg
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$ResourceGroupName,
-    [string]$DeploymentName = 'main',
-    [switch]$AddClientIpToNsg
+    [string]$DeploymentName = 'main'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -250,112 +236,26 @@ if ($gatewayFqdn) {
 # 5. RD Web URL reachability — soft warn (this machine may not be in the allow-list)
 if ($publicGatewayFqdn) {
     $rdWebUrl = "https://$publicGatewayFqdn/RDWeb/"
-
-    # Optional: temporarily open the NSG to THIS machine's public IP so the
-    # check can pass from a host that isn't in allowedClientSourceAddressPrefixes.
-    # The rule goes in a dedicated, clearly named slot (it does NOT touch the
-    # IaC-managed 'Allow-HTTPS-from-AllowedClients' rule) and is ALWAYS removed
-    # again in the finally block below. It's temporary by design - the next
-    # deployment reconciles the NSG back to allowedClientSourceAddressPrefixes.
-    $tempRuleName  = 'TEMP-PostDeployHealthTest-AllowHTTPS'
-    $tempRuleNsg   = $null
-    $tempRuleNsgRg = $null
-
-    if ($AddClientIpToNsg) {
-        $myIp = $null
-        foreach ($svc in 'https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com') {
-            try { $myIp = ([string](Invoke-RestMethod -Uri $svc -TimeoutSec 10)).Trim(); if ($myIp) { break } } catch { }
-        }
-        if ($myIp -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-            Write-Host "       [AddClientIpToNsg] Could not determine this machine's public IPv4 (got '$myIp'); skipping NSG change." -ForegroundColor DarkYellow
-        } else {
-            # Find the NSG that actually governs the gateway's inbound 443. The
-            # allow-list rule (Allow-HTTPS-from-AllowedClients) is applied at the
-            # NIC level on the rds NSG, which lives in the VNet's resource group
-            # - NOT necessarily $ResourceGroupName. Derive it from the gateway
-            # NIC so we target the right NSG and RG regardless of layout; fall
-            # back to the NIC's subnet NSG if the NIC itself has none.
-            $nicNames  = @((az network nic list -g $ResourceGroupName --query "[].name" -o tsv 2>$null) -split "`n" | Where-Object { $_ })
-            $gwNicName = $nicNames | Where-Object { $_ -match '(?i)gw' } | Select-Object -First 1
-            if (-not $gwNicName) { $gwNicName = $nicNames | Select-Object -First 1 }
-
-            $nsgId = $null
-            if ($gwNicName) {
-                $nicRaw = az network nic show -g $ResourceGroupName -n $gwNicName --query "{nsg:networkSecurityGroup.id, subnet:ipConfigurations[0].subnet.id}" -o json 2>$null
-                $nic    = if ($nicRaw) { $nicRaw | ConvertFrom-Json } else { $null }
-                if ($nic -and $nic.nsg) {
-                    $nsgId = $nic.nsg
-                } elseif ($nic -and $nic.subnet) {
-                    $nsgId = az network vnet subnet show --ids $nic.subnet --query "networkSecurityGroup.id" -o tsv 2>$null
-                }
-            }
-
-            if (-not $nsgId) {
-                Write-Host "       [AddClientIpToNsg] Could not identify the NSG on the gateway NIC; skipping NSG change." -ForegroundColor DarkYellow
-            } else {
-                $seg     = $nsgId -split '/'
-                $nsgRg   = $seg[4]
-                $nsgName = $seg[-1]
-                # Idempotent: clear any leftover rule from a previously interrupted run.
-                az network nsg rule delete -g $nsgRg --nsg-name $nsgName -n $tempRuleName -o none 2>$null
-                az network nsg rule create -g $nsgRg --nsg-name $nsgName -n $tempRuleName `
-                    --priority 105 --access Allow --direction Inbound --protocol Tcp `
-                    --source-address-prefixes "$myIp/32" --source-port-ranges '*' `
-                    --destination-address-prefixes '*' --destination-port-ranges 443 `
-                    --description 'Temporary - added by Test-PostDeployHealth.ps1; safe to delete' -o none 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    $tempRuleNsg   = $nsgName
-                    $tempRuleNsgRg = $nsgRg
-                    Write-Host "       [AddClientIpToNsg] Added temporary allow rule '$tempRuleName' for $myIp/32 on '$nsgName' (RG $nsgRg, TCP 443, priority 105). Waiting ~15s for it to take effect..." -ForegroundColor DarkGray
-                    Start-Sleep -Seconds 15
-                } else {
-                    Write-Host "       [AddClientIpToNsg] Could not add the NSG rule (insufficient permissions on '$nsgName'?); continuing without it." -ForegroundColor DarkYellow
-                }
-            }
-        }
-    }
-
     try {
-        # Retry only matters once we've opened the NSG (rule propagation +
-        # gateway warm-up). Without the switch, keep the original single attempt.
-        $maxAttempts = if ($tempRuleNsg) { 4 } else { 1 }
-        $ok = $false
-        $lastErr = ''
-        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            try {
-                $resp = Invoke-WebRequest -Uri $rdWebUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
-                if ($resp.StatusCode -eq 200) { $ok = $true; break }
-                $lastErr = "Status $($resp.StatusCode)"
-            } catch {
-                $lastErr = $_.Exception.Message
-            }
-            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds 10 }
-        }
-
-        if ($ok) {
-            $how = if ($tempRuleNsg) { ' (via temporary NSG rule)' } else { '' }
-            Write-TestResult "RD Web reachable: $rdWebUrl$how" $true
-        } elseif ($lastErr -match 'timeout|timed out|canceled|actively refused|unreachable') {
-            # A timeout/connection-refused from here almost always means this
-            # machine's public IP isn't allowed through the NSG (it silently
-            # drops non-allowed clients), or the gateway is still warming up.
-            # Soft warning: it doesn't prove the gateway is unhealthy, only that
-            # THIS machine couldn't reach it.
-            $hint = if (-not $AddClientIpToNsg) { ' Re-run with -AddClientIpToNsg to temporarily open the NSG to this machine.' } else { '' }
-            Write-TestResult "RD Web not reachable from this machine: $rdWebUrl" $false `
-                "Connection timed out. Most likely this machine's public IP isn't in allowedClientSourceAddressPrefixes, or the gateway is still warming up.$hint" -SoftWarn
+        $resp = Invoke-WebRequest -Uri $rdWebUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+        if ($resp.StatusCode -eq 200) {
+            Write-TestResult "RD Web reachable: $rdWebUrl" $true
         } else {
-            Write-TestResult "RD Web not reachable from this machine: $rdWebUrl" $false $lastErr -SoftWarn
+            Write-TestResult "RD Web reachable: $rdWebUrl" $false "Status $($resp.StatusCode)" -SoftWarn
         }
-    } finally {
-        if ($tempRuleNsg) {
-            az network nsg rule delete -g $tempRuleNsgRg --nsg-name $tempRuleNsg -n $tempRuleName -o none 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "       [AddClientIpToNsg] Removed temporary NSG rule '$tempRuleName'." -ForegroundColor DarkGray
-            } else {
-                Write-Host "       [AddClientIpToNsg] WARNING: could not remove temporary rule '$tempRuleName' on '$tempRuleNsg'. Remove it manually:" -ForegroundColor Yellow
-                Write-Host "           az network nsg rule delete -g $tempRuleNsgRg --nsg-name $tempRuleNsg -n $tempRuleName" -ForegroundColor Yellow
-            }
+    } catch {
+        $msg = $_.Exception.Message
+        # A timeout/connection-refused from here usually means this machine's
+        # public IP isn't in allowedClientSourceAddressPrefixes (so the subnet
+        # governance NSG drops it), or the gateway is still warming up. Soft
+        # warning: it doesn't prove the gateway is unhealthy, only that THIS
+        # machine couldn't reach it. For durable access add the IP to
+        # allowedClientSourceAddressPrefixes and redeploy.
+        if ($msg -match 'timeout|timed out|canceled|actively refused|unreachable') {
+            Write-TestResult "RD Web not reachable from this machine: $rdWebUrl" $false `
+                "Connection timed out. Most likely this machine's public IP isn't in allowedClientSourceAddressPrefixes, or the gateway is still warming up. Verify from an allow-listed client." -SoftWarn
+        } else {
+            Write-TestResult "RD Web not reachable from this machine: $rdWebUrl" $false $msg -SoftWarn
         }
     }
 }

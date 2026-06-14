@@ -21,7 +21,7 @@ From a clean run — pipeline or laptop — the template performs the following 
 
 | # | Step | Where it runs | How |
 | --- | --- | --- | --- |
-| 1 | Provision NSG, LB, Public IP, NICs, VMs (Trusted Launch) | ARM control plane | Bicep |
+| 1 | Provision LB, Public IP, NICs, VMs (Trusted Launch); add the client allow-list rules to the subnet's governance NSG | ARM control plane | Bicep |
 | 2 | Set NIC DNS → your existing DC IP (`adDnsServerIp`) | VM NIC | Bicep (`dnsSettings.dnsServers`) |
 | 3 | **Domain-join every VM** to your existing AD | VM | `JsonADDomainExtension` v1.3 (`Options: 3`) |
 | 4 | Install RDS roles (`RDS-Gateway`, `RDS-Web-Access`, `RPC-over-HTTP-Proxy`, `RDS-Connection-Broker`, `RDS-Licensing`, `RDS-RD-Server`, RSAT) | VM | DSC `WindowsFeature` resources |

@@ -80,7 +80,7 @@ az deployment group what-if `
 
 What to look for in `what-if`:
 
-- `+ Create` for every VM, NIC, LB, PIP, NSG you expect (no `Modify`/`Delete` on existing AD or VNet resources).
+- `+ Create` for every VM, NIC, LB, PIP you expect, plus two `+ Create` securityRules (Allow-HTTPS / Allow-UDP3391) on the existing subnet NSG. No other `Modify`/`Delete` on existing AD or VNet resources.
 - The Key Vault role assignment shows as `+ Create` in the **vault's** resource group (cross-RG).
 - No surprise `Modify` on `Microsoft.Compute/virtualMachines/extensions` for unrelated VMs.
 

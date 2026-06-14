@@ -15,7 +15,7 @@ This template replaces the legacy [`Azure/RDS-Templates`](https://github.com/Azu
 | RD Gateway / RD Web Access VM | 1 | Private IP, joined to LB backend |
 | RD Connection Broker / RD Licensing VM | 1 | Private only |
 | RD Session Host VMs | `sessionHostCount` (default 2) | Private only |
-| Network Security Group | 1 | Allow-list source CIDRs |
+| Subnet NSG allow rules | 2 | TCP 443 + UDP 3391 from allow-listed CIDRs, written to the existing governance NSG (no NIC NSG) |
 | Azure Bastion (Standard) | 1 (optional) | Admin access only |
 | User-assigned Managed Identity (cert flow) | 1 (optional) | KV Secrets User |
 
@@ -186,6 +186,7 @@ The values below are baked into [`main.bicepparam`](main.bicepparam) during Tier
 | `vmSize` | no (`Standard_D4s_v5`) | file | Used for every RDS VM. |
 | `windowsSku` | no (`2022-datacenter-azure-edition`) | file | Azure Edition recommended (hotpatch capable). |
 | `allowedClientSourceAddressPrefixes` | yes | file | CIDRs allowed to reach 443 / UDP 3391. **Do not use `0.0.0.0/0`.** |
+| `subnetNsgName` | no (auto-set by Tier 0) | file | Governance NSG already attached to the RDS subnet. The farm writes the allow-list (443 / UDP 3391) as named rules here instead of attaching its own NIC NSG. Tier 0 discovers it from the live subnet; empty = skip writing rules. |
 | `gatewayDnsLabelPrefix` | yes | file | Becomes `<prefix>.<region>.cloudapp.azure.com`. |
 | `deployBastion` | no (`true`) | file | Set `false` if you already have Bastion in a hub VNet. |
 | `availabilityZones` | no (`['1','2','3']`) | file | Reduce if the region has fewer zones. |
@@ -268,7 +269,7 @@ rds-farm/
 ├── dsc/
 │   └── Configuration.ps1       # SessionHost / Gateway / RDSDeployment configs
 ├── modules/
-│   ├── network.bicep           # NSG + existing subnet lookup
+│   ├── network.bicep           # existing subnet lookup + allow-list rules on governance NSG
 │   ├── loadbalancer.bicep      # Standard PIP + LB
 │   ├── bastion.bicep           # optional Azure Bastion (Standard)
 │   ├── vm.bicep                # VM + NIC + domain-join + (optional) KV ext

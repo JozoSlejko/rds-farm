@@ -3,7 +3,6 @@ param location string
 param vmSize string
 param windowsSku string
 param subnetId string
-param nsgId string
 param backendPoolId string = ''
 param adDnsServerIp string
 param localAdminUserName string
@@ -44,9 +43,6 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   location: location
   tags: tags
   properties: {
-    networkSecurityGroup: {
-      id: nsgId
-    }
     ipConfigurations: [
       {
         name: 'ipconfig1'

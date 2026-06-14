@@ -38,8 +38,8 @@ The pipeline's service principal (created by Tier 0) holds these roles. The firs
 | Scope | Role | Why | Granted by Tier 0? |
 | --- | --- | --- | --- |
 | Subscription | `Contributor` + `Role Based Access Control Administrator` | `Contributor` is required to create the farm RG and read across the existing VNet RG; `RBAC Admin` is required because [`modules/sa-role.bicep`](../modules/sa-role.bicep) and [`modules/kv-role.bicep`](../modules/kv-role.bicep) create role assignments in the artifacts and Key Vault RGs at deploy time. Also implicitly satisfies all narrower scopes below. | **Yes** |
-| Target resource group (`rds-farm-rg`) | `Contributor` | Deploy VMs, LB, NSG, etc. | Inherited from sub |
-| Existing VNet RG | `Network Contributor` | Read existing VNet/subnet, attach NSG. | Inherited from sub |
+| Target resource group (`rds-farm-rg`) | `Contributor` | Deploy VMs, LB, etc. | Inherited from sub |
+| Existing VNet RG | `Network Contributor` | Read existing VNet/subnet, write the client allow-list rules to the subnet's governance NSG. | Inherited from sub |
 | Existing Key Vault (if cert binding) | `Key Vault Reader` + `Role Based Access Control Administrator` | [`modules/kv-role.bicep`](../modules/kv-role.bicep) creates a role assignment, which needs `Microsoft.Authorization/roleAssignments/write`. | Inherited from sub |
 | Artifacts storage account | `Storage Blob Data Contributor` | Upload `Configuration.zip` from CI (the `--auth-mode login` flag uses the SP's Entra token, no account keys, no SAS). The VMs themselves use a separate UAMI with `Storage Blob Data Reader` (granted by [`modules/sa-role.bicep`](../modules/sa-role.bicep)) to read the blob back at apply-time. | Inherited from sub |
 

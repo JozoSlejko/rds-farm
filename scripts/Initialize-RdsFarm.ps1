@@ -96,6 +96,14 @@
     String[] of CIDRs allowed to reach TCP 443 / UDP 3391. Office / VPN
     egress IPs only — NEVER '0.0.0.0/0'. Required.
 
+.PARAMETER SubnetNsgName
+    Optional. Name of the governance NSG already attached to the RDS subnet
+    (landing-zone / Azure Policy managed), co-located in the VNet resource
+    group. The farm writes its client allow-list (TCP 443 / UDP 3391) as named
+    rules on this NSG instead of attaching its own NIC NSG. When omitted, the
+    script auto-discovers it from the live subnet in Step 6. If the subnet has
+    no NSG, no allow-list is written and the gateway stays unreachable.
+
 .PARAMETER PublicGatewayFqdn
     Public hostname clients will type. Required for -CertMode Csr / ImportPfx
     (a vanity FQDN you own, e.g. 'rds.contoso.com' — must match the cert
@@ -236,6 +244,7 @@ param(
     [string]$ExistingVnetResourceGroup,
     [string]$ExistingRdsSubnetName,
     [string[]]$AllowedClientSourceAddressPrefixes,
+    [string]$SubnetNsgName,
 
     # Gateway hostname
     [string]$PublicGatewayFqdn,
@@ -496,7 +505,7 @@ function Update-BicepParamString {
     param(
         [Parameter(Mandatory)][string]$Body,
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][string]$Value
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value
     )
     $pattern = "(?m)^(?<lead>\s*param\s+$([regex]::Escape($Name))\s*=\s*)'[^']*'"
     if ($Body -notmatch $pattern) {
@@ -551,7 +560,7 @@ function Get-MyObjectId {
 $script:RdsFarmInitConfigSections = @(
     @{ Title = 'GitHub & Azure scope'; Params = @('GitHubRepo','SubscriptionId','Location') }
     @{ Title = 'Active Directory'    ; Params = @('AdDomainName','AdDnsServerIp','DomainJoinUserName','DomainJoinOuPath','LocalAdminUserName','RdsAccessGroup') }
-    @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes') }
+    @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes','SubnetNsgName') }
     @{ Title = 'Gateway hostname'    ; Params = @('PublicGatewayFqdn','GatewayDnsLabelPrefix') }
     @{ Title = 'Bastion'             ; Params = @('DeployBastion') }
     @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
@@ -1031,6 +1040,7 @@ Write-Host "    Domain-join target OU        : $(if ($DomainJoinOuPath) { $Domai
 Write-Host "    Local admin                  : $LocalAdminUserName"
 Write-Host "    RDS access group             : $RdsAccessGroup"
 Write-Host "    Existing VNet/subnet         : $ExistingVnetResourceGroup/$ExistingVnetName/$ExistingRdsSubnetName"
+Write-Host "    Subnet governance NSG        : $(if ($SubnetNsgName) { $SubnetNsgName } else { '(auto-discovered from subnet in Step 6)' })"
 Write-Host "    Allowed client CIDRs         : $($AllowedClientSourceAddressPrefixes -join ', ')"
 Write-Host "    Public gateway FQDN          : $PublicGatewayFqdn"
 Write-Host "    Cert subject                 : $certificateSubject"
@@ -1275,10 +1285,26 @@ Write-Host "    Backup written: $backup"
 $content = Get-Content -LiteralPath $BicepParamFile -Raw
 $origLen = $content.Length
 
+# Discover the subnet's governance NSG so the farm can write its client allow-list
+# there. The farm no longer attaches its own NIC NSG; modules/network.bicep adds
+# the 443/3391 allow rules to this NSG. Bicep can't read the subnet's NSG at
+# deploy start, so we resolve it here and pass the name through the bicepparam.
+if ([string]::IsNullOrWhiteSpace($SubnetNsgName)) {
+    $snNsgId = az network vnet subnet show -g $ExistingVnetResourceGroup --vnet-name $ExistingVnetName -n $ExistingRdsSubnetName --query 'networkSecurityGroup.id' -o tsv 2>$null
+    if ($LASTEXITCODE -eq 0 -and $snNsgId) {
+        $SubnetNsgName = ($snNsgId -split '/')[-1]
+        Write-Host "    Discovered subnet governance NSG: $SubnetNsgName" -ForegroundColor DarkGray
+    } else {
+        Write-Host "    WARNING: subnet '$ExistingRdsSubnetName' has no associated NSG. The farm will NOT write a client allow-list, so the gateway will be unreachable from the internet. Attach a governance NSG to the subnet (or set -SubnetNsgName)." -ForegroundColor Yellow
+    }
+}
+
 $stringPatches = [ordered]@{
     existingVnetName                       = $ExistingVnetName
     existingVnetResourceGroup              = $ExistingVnetResourceGroup
     existingRdsSubnetName                  = $ExistingRdsSubnetName
+    # Governance NSG the farm writes its 443/3391 allow-list to (discovered above).
+    subnetNsgName                          = $SubnetNsgName
     adDomainName                           = $AdDomainName
     adDnsServerIp                          = $AdDnsServerIp
     domainJoinUserName                     = $DomainJoinUserName
