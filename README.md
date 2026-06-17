@@ -10,14 +10,22 @@ This template replaces the legacy [`Azure/RDS-Templates`](https://github.com/Azu
 
 | Component | Count | Network exposure |
 | --- | --- | --- |
-| Public IP (Standard, zone-redundant) | 1 | Internet → LB only |
-| Standard Load Balancer | 1 | TCP 443, UDP 3391 → Gateway pool |
-| RD Gateway / RD Web Access VM | 1 | Private IP, joined to LB backend |
+| Public IP (Standard, zone-redundant) | 1 (public-LB mode) | Internet → LB only |
+| Standard Load Balancer | 1 (public-LB mode) | TCP 443, UDP 3391 → Gateway pool |
+| RD Gateway / RD Web Access VM | 1 | Private IP (joined to the LB backend in public-LB mode) |
 | RD Connection Broker / RD Licensing VM | 1 | Private only |
 | RD Session Host VMs | `sessionHostCount` (default 2) | Private only |
-| Subnet NSG allow rules | 2 | TCP 443 + UDP 3391 from allow-listed CIDRs, written to the existing governance NSG (no NIC NSG) |
+| Subnet NSG allow rules | 2 (public-LB mode) | TCP 443 + UDP 3391 from allow-listed CIDRs, written to the existing governance NSG (no NIC NSG) |
+| Entra app proxy connector VM | 1 (App Proxy mode) | **Outbound only** — no public ingress |
 | Azure Bastion (Standard) | 1 (optional) | Admin access only |
 | User-assigned Managed Identity (cert flow) | 1 (optional) | KV Secrets User |
+
+> [!NOTE]
+> **Two ingress modes.** By default the farm fronts the gateway with a public
+> Standard Load Balancer. Set `useAppProxy` (Tier 0 `-UseAppProxy`) to publish
+> through **Microsoft Entra application proxy** instead — no public IP/LB, no
+> internet inbound rules, an outbound-only connector VM, and Entra
+> pre-authentication. Design + cutover: [docs/app-proxy.md](docs/app-proxy.md).
 
 All VMs use **Trusted Launch**, **Premium SSD managed disks**, **AutomaticByPlatform patching**, and **availability zones**. RDS roles are installed and configured by **PowerShell DSC** (`dsc/Configuration.ps1`). TLS certificates can optionally be pulled from **Azure Key Vault** via the Key Vault VM extension and bound to all four RDS roles automatically.
 
@@ -42,6 +50,21 @@ flowchart TB
     Broker -. LDAP/Kerberos .-> DC
     SH -. LDAP/Kerberos .-> DC
 ```
+
+> **App Proxy mode** (`useAppProxy`) removes the public IP + LB and the internet
+> inbound rules. An outbound-only connector dials Microsoft's edge, and users
+> authenticate to Entra ID (Conditional Access + MFA) before reaching the gateway:
+
+```mermaid
+flowchart LR
+    User[Remote users] -->|HTTPS| Entra[Entra ID<br/>pre-auth + MFA]
+    Entra --> AP[App Proxy edge]
+    AP <-->|outbound 443| Conn[Connector VM<br/>in VNet]
+    Conn -->|HTTPS 443| GW[RD Gateway<br/>private IP]
+    GW -. private .-> Broker[Broker + session hosts]
+```
+
+Full design and cutover runbook: [docs/app-proxy.md](docs/app-proxy.md).
 
 ---
 

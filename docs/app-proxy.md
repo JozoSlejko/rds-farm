@@ -281,7 +281,7 @@ enterprise app for defense-in-depth.
   `publicGatewayFqdn` == external FQDN).
 - ✅ `tests/Test-PostDeployHealth.ps1` — skips the public-LB checks and resolves the
   App Proxy external FQDN when `useAppProxy`.
-- ☐ README architecture diagram + "What it deploys" table (optional polish).
+- ✅ README architecture diagram + "What it deploys" table.
 
 ---
 
