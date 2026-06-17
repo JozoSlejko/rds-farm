@@ -1,20 +1,15 @@
 name: Validate
 
-# Azure-free static validation on every PR + push to main. This COMPLEMENTS the
-# manual-only deploy.yml (which bundles the same checks with a live deploy): it
-# needs NO Azure credentials and NO VNet line-of-sight, so it runs on
-# GitHub-hosted runners for fast feedback on every change.
+# Azure-free static validation. MANUAL-ONLY (workflow_dispatch) to honor this
+# repo's no-auto-run policy - the same reason deploy.yml never triggers on
+# push/PR. Run it on demand from the Actions tab or `gh workflow run validate.yml`
+# when you want the full gate, including the Windows job that does the
+# authoritative Windows PowerShell 5.1 DSC parse you can't run on macOS.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: validate-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   BICEP_FILE: main.bicep

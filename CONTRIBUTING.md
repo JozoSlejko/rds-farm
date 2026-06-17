@@ -49,8 +49,9 @@ pwsh -c "Invoke-ScriptAnalyzer -Path scripts,tests -Recurse -Settings ./PSScript
 
 Or open the repo in the **dev container** (`.devcontainer/`), or run the VS Code
 tasks (**Terminal → Run Task**), or use the `/validate` prompt in Copilot Chat.
-The [`Validate`](.github/workflows/validate.yml) workflow runs all of this on every
-PR, plus a **Windows** job that does the authoritative DSC 5.1 parse.
+The [`Validate`](.github/workflows/validate.yml) workflow runs all of this **on
+demand** (manual `workflow_dispatch` — never auto-triggered), including a
+**Windows** job that does the authoritative DSC 5.1 parse.
 
 ## Tests
 

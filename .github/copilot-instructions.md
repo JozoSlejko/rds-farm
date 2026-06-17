@@ -78,6 +78,13 @@ validate.yml `dsc-parse` job enforce this with a real 5.1 parse.
 - Plain scripts (not Pester): they print `[PASS]` / `[FAIL]` and **exit non-zero**
   on failure so they can gate CI. Run the relevant ones before deploying.
 
+## CI / workflows
+
+- Workflows are **manual-only** (`workflow_dispatch`). **Never add `push` /
+  `pull_request` triggers.** `deploy.yml` needs an in-VNet runner; even the
+  Azure-free `validate.yml` is opt-in by policy — run it from the Actions tab or
+  `gh workflow run` on demand.
+
 ## Git
 
 - Conventional-ish messages (`docs:`, `feat:`, `fix:`, `refactor:`).
