@@ -1,0 +1,42 @@
+# EditorConfig — https://editorconfig.org
+#
+# Pairs with .gitattributes (LF everywhere) and the repo's PowerShell encoding
+# rule: any .ps1 containing non-ASCII characters MUST be saved as UTF-8 *with
+# BOM* so Windows PowerShell 5.1 on the RDS VMs decodes it as UTF-8 instead of
+# the system ANSI codepage (cp1252) — which silently corrupts em-dashes / smart
+# quotes and breaks the parser far downstream.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+# PowerShell — 4-space indent. BOM is required: without it, PS 5.1 on
+# WS2019/2022 reads the file as cp1252 and a UTF-8 em-dash becomes "â€"",
+# cascading into bogus "Missing closing '}'" parse errors.
+[*.ps1]
+indent_size = 4
+charset = utf-8-bom
+
+[*.{psd1,psm1}]
+indent_size = 4
+charset = utf-8-bom
+
+# Bicep / params — 2-space indent (matches the `az bicep format` output).
+[*.{bicep,bicepparam}]
+indent_size = 2
+
+[*.{json,jsonc}]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+# Markdown — 2-space indent. Don't strip trailing whitespace here; markdownlint
+# governs hard line breaks, and EditorConfig trimming would fight it.
+[*.md]
+indent_size = 2
+trim_trailing_whitespace = false

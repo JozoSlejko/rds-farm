@@ -1,0 +1,125 @@
+name: Validate
+
+# Azure-free static validation on every PR + push to main. This COMPLEMENTS the
+# manual-only deploy.yml (which bundles the same checks with a live deploy): it
+# needs NO Azure credentials and NO VNet line-of-sight, so it runs on
+# GitHub-hosted runners for fast feedback on every change.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BICEP_FILE: main.bicep
+  BICEPPARAM_FILE: main.bicepparam
+  PREREQS_BICEP_FILE: prereqs/tier0.bicep
+  PREREQS_BICEPPARAM_FILE: prereqs/tier0.bicepparam
+
+jobs:
+  static:
+    name: Bicep / Markdown / Params / Encoding / PSSA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bicep CLI
+        run: |
+          curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x bicep && sudo mv bicep /usr/local/bin/bicep
+          bicep --version
+
+      - name: Bicep build (main + prereqs)
+        run: |
+          bicep build "$BICEP_FILE"
+          bicep build "$PREREQS_BICEP_FILE"
+
+      - name: Bicep build-params (main + prereqs)
+        env:
+          DOMAIN_JOIN_PASSWORD: dummy-for-lint-only
+          LOCAL_ADMIN_PASSWORD: dummy-for-lint-only
+        run: |
+          bicep build-params "$BICEPPARAM_FILE"
+          bicep build-params "$PREREQS_BICEPPARAM_FILE"
+
+      - name: markdownlint (README + docs)
+        uses: DavidAnson/markdownlint-cli2-action@v23
+        with:
+          globs: |
+            README.md
+            docs/**/*.md
+
+      - name: Bicep param-value sanity (main farm)
+        shell: pwsh
+        env:
+          DOMAIN_JOIN_PASSWORD: dummy-for-validation-only
+          LOCAL_ADMIN_PASSWORD: dummy-for-validation-only
+        run: ./tests/Test-BicepParamValues.ps1
+
+      - name: PowerShell encoding guard (dsc/ runs under Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          # dsc/Configuration.ps1 and dsc/Bootstrap.ps1 are executed on the VM by
+          # the Azure DSC / Custom Script extensions under Windows PowerShell 5.1,
+          # which mis-decodes BOM-less non-ASCII as cp1252. Keep them ASCII
+          # (preferred) or UTF-8 BOM. scripts/ + tests/ run on PS7 and are exempt.
+          $bad = @()
+          Get-ChildItem dsc -Recurse -Filter *.ps1 -File | ForEach-Object {
+              $b = [System.IO.File]::ReadAllBytes($_.FullName)
+              $hasBom  = $b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF
+              $hasHigh = $false
+              foreach ($x in $b) { if ($x -ge 0x80) { $hasHigh = $true; break } }
+              if ($hasHigh -and -not $hasBom) { $bad += $_.FullName }
+          }
+          if ($bad.Count) {
+              Write-Host "::error::These dsc/ .ps1 files have non-ASCII bytes but no UTF-8 BOM (Windows PowerShell 5.1 will mis-decode them):"
+              $bad | ForEach-Object { Write-Host "::error::  $_" }
+              exit 1
+          }
+          Write-Host '[OK] dsc/ .ps1 files are ASCII or UTF-8 BOM.'
+
+      - name: PSScriptAnalyzer (scripts/ + tests/)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -AllowClobber
+          $r = @('scripts', 'tests') | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Recurse -Settings ./PSScriptAnalyzerSettings.psd1 }
+          if ($r) { $r | Format-Table Severity, RuleName, ScriptName, Line, Message -AutoSize | Out-String -Width 200 | Write-Host }
+          $errs  = @($r | Where-Object Severity -eq 'Error')
+          $warns = @($r | Where-Object Severity -eq 'Warning')
+          Write-Host "PSScriptAnalyzer: $($errs.Count) error(s), $($warns.Count) warning(s)."
+          if ($errs.Count) { exit 1 }
+
+  dsc-parse:
+    name: DSC parse (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: DSC config — PSScriptAnalyzer, parse, discovery
+        shell: pwsh
+        run: ./tests/Test-DscConfiguration.ps1
+
+      - name: DSC scripts — parse under Windows PowerShell 5.1 (authoritative grammar)
+        shell: powershell
+        run: |
+          $bad = $false
+          foreach ($f in 'dsc\Configuration.ps1', 'dsc\Bootstrap.ps1') {
+            $path = Join-Path $PWD $f
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errs)
+            if ($errs) {
+              Write-Host "FAIL: $f does not parse under Windows PowerShell 5.1"
+              $errs | Format-List Extent, Message
+              $bad = $true
+            } else {
+              Write-Host "[OK] $f parses under Windows PowerShell 5.1"
+            }
+          }
+          if ($bad) { exit 1 }

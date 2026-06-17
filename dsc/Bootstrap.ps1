@@ -23,7 +23,7 @@
          CSE process mid-stream.
       6. If a reboot is pending, schedules a deferred restart (120s) so CSE
          can report success first. CSE docs explicitly say "Don't put
-         restarts inside the script" — shutdown.exe /r /t is the documented
+         restarts inside the script" - shutdown.exe /r /t is the documented
          escape hatch because it returns immediately.
 
 .NOTES
