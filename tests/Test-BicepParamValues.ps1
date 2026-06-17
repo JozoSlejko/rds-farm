@@ -174,6 +174,23 @@ if ($deployBastion) {
     Write-Host '[SKIP] deployBastion = false; bastion subnet check not applicable' -ForegroundColor DarkGray
 }
 
+# 8. Application proxy - when useAppProxy is true, appProxyExternalFqdn must be a
+# valid public DNS name, and publicGatewayFqdn should equal it (the RD Web HTML5
+# client requires the internal and external FQDN to be the same).
+$useAppProxyRaw = Get-ParamValue 'useAppProxy'
+$useAppProxy    = if ($null -eq $useAppProxyRaw) { $false } else { [bool]$useAppProxyRaw }
+if ($useAppProxy) {
+    $apFqdn   = Get-ParamValue 'appProxyExternalFqdn'
+    $apFqdnOk = $apFqdn -match '^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+    Write-TestResult "appProxyExternalFqdn is a valid DNS name ($apFqdn)" $apFqdnOk 'Required when useAppProxy=true.'
+
+    $pubFqdn = Get-ParamValue 'publicGatewayFqdn'
+    Write-TestResult 'publicGatewayFqdn equals appProxyExternalFqdn (RD Web client needs internal==external)' `
+        ($pubFqdn -eq $apFqdn) "publicGatewayFqdn='$pubFqdn' appProxyExternalFqdn='$apFqdn'"
+} else {
+    Write-Host '[SKIP] useAppProxy = false; application proxy checks not applicable' -ForegroundColor DarkGray
+}
+
 # Summary
 Write-Host ('-' * 60)
 if ($failures.Count -gt 0) {

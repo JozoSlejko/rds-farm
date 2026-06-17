@@ -95,6 +95,7 @@ Write-Host ('-' * 60)
 #    lookup usually lands on a stale / Failed record with no outputs.
 $gatewayFqdn       = $null
 $publicGatewayFqdn = $null
+$useAppProxy       = $false
 $resolvedName      = $DeploymentName
 
 if (-not $PSBoundParameters.ContainsKey('DeploymentName')) {
@@ -134,6 +135,7 @@ if ($deploy.state -eq 'Succeeded') {
 if ($deploy.outputs -and $deploy.outputs.gatewayFqdn) {
     $gatewayFqdn       = $deploy.outputs.gatewayFqdn.value
     $publicGatewayFqdn = $deploy.outputs.publicGatewayFqdn.value
+    if ($deploy.outputs.PSObject.Properties['useAppProxy']) { $useAppProxy = [bool]$deploy.outputs.useAppProxy.value }
 } else {
     # Outputs absent (typical when parent deployment is Failed). Fall back to
     # discovering the load balancer's public IP FQDN directly.
@@ -197,8 +199,10 @@ if ($vmHealthFailures.Count -gt 0) {
 # exposed through ARM). On failure (older api-versions, missing health endpoint
 # in the region) we soft-warn instead of failing the test — VM extension state
 # + Resource Health already cover whether the backends are functional.
-$lbId = az network lb list -g $ResourceGroupName --query "[0].id" -o tsv
-if (-not $lbId) {
+$lbId = if ($useAppProxy) { $null } else { az network lb list -g $ResourceGroupName --query "[0].id" -o tsv }
+if ($useAppProxy) {
+    Write-Host '[SKIP] App Proxy mode: no public load balancer to health-check.' -ForegroundColor DarkGray
+} elseif (-not $lbId) {
     Write-TestResult 'Load Balancer present' $false
 } else {
     $poolNames = (az network lb address-pool list --lb-name (Split-Path $lbId -Leaf) -g $ResourceGroupName --query "[].name" -o tsv) -split "`n" | Where-Object { $_ }
@@ -236,16 +240,18 @@ if (-not $lbId) {
     }
 }
 
-# 4. DNS resolution
-if ($gatewayFqdn) {
+# 4. DNS resolution - the LB hostname normally, the App Proxy external FQDN when
+# publishing through application proxy (there is no LB hostname then).
+$dnsName = if ($useAppProxy) { $publicGatewayFqdn } else { $gatewayFqdn }
+if ($dnsName) {
     try {
-        $null = [System.Net.Dns]::GetHostAddresses($gatewayFqdn)
-        Write-TestResult "DNS resolves: $gatewayFqdn" $true
+        $null = [System.Net.Dns]::GetHostAddresses($dnsName)
+        Write-TestResult "DNS resolves: $dnsName" $true
     } catch {
-        Write-TestResult "DNS resolves: $gatewayFqdn" $false $_.Exception.Message
+        Write-TestResult "DNS resolves: $dnsName" $false $_.Exception.Message -SoftWarn
     }
 } else {
-    Write-TestResult 'DNS resolves: gatewayFqdn' $false 'gatewayFqdn unknown (no outputs, no LB public IP).' -SoftWarn
+    Write-TestResult 'DNS resolves: gateway FQDN' $false 'FQDN unknown (no outputs, no LB public IP).' -SoftWarn
 }
 
 # 5. RD Web URL reachability — soft warn (this machine may not be in the allow-list)

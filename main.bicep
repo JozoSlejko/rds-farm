@@ -369,3 +369,4 @@ output publicGatewayFqdn string = effectiveGatewayFqdn
 output rdWebUrl string = 'https://${effectiveGatewayFqdn}/RDWeb'
 output bastionName string = deployBastion ? bastion!.outputs.bastionName : ''
 output connectorVmName string = useAppProxy ? connectorVm!.outputs.vmName : ''
+output useAppProxy bool = useAppProxy

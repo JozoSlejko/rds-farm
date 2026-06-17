@@ -247,46 +247,68 @@ enterprise app for defense-in-depth.
 
 ---
 
-## Repo impact — staged implementation
+## Repo impact — implementation status
 
-> Status legend: ☐ not started.
+> ✅ done (committed) · ☐ remaining (manual / admin).
 
-### Phase 1 — Entra + cert plumbing (runs alongside the public path)
+### Phase 1 — Entra + cert plumbing ✅
 
-Stand up the proxy and cert without touching the farm topology yet, so the new
-path can be validated before cutting over.
+- ✅ `scripts/New-LetsEncryptRdsCertificate.ps1` — `posh-acme` DNS-01 with
+  `-DnsAlias` → Azure DNS; import to KV `rds-tls` (only on thumbprint change); stage the PFX.
+- ✅ `scripts/Configure-AppProxy.ps1` — Microsoft Graph: instantiate the app,
+  `onPremisesPublishing` (Entra pre-auth, RDS flags), custom-domain cert upload,
+  connector group, group assignment.
+- ✅ DSC — gated `Rds07_PreAuthCustomRdp` step driven by `$PreAuthServerUrl`.
+- ☐ Azure DNS zone `acme.slejco.com` + one-time GoDaddy NS delegation + static CNAME (**manual**).
+- ☐ Connector VM **software**: MSI install + registration (**admin step** — needs an interactive Entra token).
 
-- ☐ `scripts/New-LetsEncryptRdsCertificate.ps1` — `posh-acme` DNS-01 with
-  `-DnsAlias` → Azure DNS; import to KV `rds-tls`; emit PFX for App Proxy.
-- ☐ `scripts/Configure-AppProxy.ps1` — Microsoft Graph: create the enterprise app,
-  connector group, `onPremisesPublishing` settings above, custom-domain cert upload,
-  user assignment.
-- ☐ Azure DNS zone `acme.slejco.com` + one-time GoDaddy NS delegation + static CNAMEs
-  (documented manual steps).
-- ☐ Connector VM (one, lab) with the connector MSI + internal DNS.
-- ☐ DSC: `dsc/Configuration.ps1` — `CertificateSubject = 'CN=rds.slejco.com'`,
-  `GatewayExternalFqdn = 'rds.slejco.com'`, add the pre-auth `CustomRdpProperty`.
+### Phase 2 — Bicep `useAppProxy` flag ✅
 
-### Phase 2 — Bicep topology flag `useAppProxy`
-
-- ☐ `main.bicep` — when `useAppProxy`, skip the `loadbalancer` + public IP modules,
-  drop the internet inbound NSG allow rules, add a connector VM module.
-- ☐ `modules/network.bicep` — conditionalize the two client allow rules (no internet
-  inbound when `useAppProxy`).
-- ☐ New `modules/appproxy-connector.bicep` — the connector VM(s).
-- ☐ `scripts/Initialize-RdsFarm.ps1` (Tier 0) — new params `-UseAppProxy`,
-  `-AppProxyExternalFqdn rds.slejco.com`; persist into `main.bicepparam`.
-- ☐ `main.bicepparam` — `useAppProxy = true`, `appProxyExternalFqdn = 'rds.slejco.com'`,
-  `publicGatewayFqdn = 'rds.slejco.com'`, `certificateSubject = 'CN=rds.slejco.com'`.
+- ✅ `main.bicep` — `useAppProxy` / `appProxyExternalFqdn`; the public IP + load
+  balancer become `if (!useAppProxy)`; a connector VM (reusing `modules/vm.bicep`,
+  which already does domain-join + optional identity + optional backend pool);
+  `PreAuthServerUrl` wired into the broker DSC; conditional outputs via the `!` pattern.
+- ✅ `modules/network.bicep` — `writeInternetInboundRules` (= `!useAppProxy`) gates
+  the two internet-facing inbound NSG rules.
+- ✅ `scripts/Initialize-RdsFarm.ps1` (Tier 0) — `-UseAppProxy` / `-AppProxyExternalFqdn`
+  (+ Step 6 bicepparam patching).
+- ✅ `main.bicepparam` — declares `useAppProxy` / `appProxyExternalFqdn`; Tier 0 owns the values.
 
 ### Phase 3 — Docs + tests
 
-- ☐ This page + cross-link from `docs/fqdn-and-cert.md` (add the Let's Encrypt path)
-  and update the README architecture diagram + "What it deploys" table.
-- ☐ `tests/Test-PostDeployHealth.ps1` — when `useAppProxy`, skip the public-LB checks;
-  verify connector health + reachability of the App Proxy external URL + the internal binding.
-- ☐ `tests/Test-PreDeployReadiness.ps1` — check connector egress reachability, the KV cert,
-  and that the Azure DNS delegation resolves.
+- ✅ This page (status + cutover runbook below).
+- ✅ `tests/Test-BicepParamValues.ps1` — App Proxy invariant (valid `appProxyExternalFqdn`,
+  `publicGatewayFqdn` == external FQDN).
+- ✅ `tests/Test-PostDeployHealth.ps1` — skips the public-LB checks and resolves the
+  App Proxy external FQDN when `useAppProxy`.
+- ☐ README architecture diagram + "What it deploys" table (optional polish).
+
+---
+
+## Cutover — turning App Proxy on
+
+Once the manual prerequisites (Azure DNS delegation, connector VM + registered MSI,
+GoDaddy CNAME) are in place, run from an **in-VNet** host:
+
+1. **Issue the cert:** `./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com`
+   (use `-Staging` for the first run). Imports to KV `rds-tls` and stages a PFX.
+2. **Publish the app:** `./scripts/Configure-AppProxy.ps1 -PfxPath <staged.pfx>
+   -PfxPassword <secure> -AssignGroupName 'RDS-Users'`. Note the `<app>.msappproxy.net`
+   target it reports.
+3. **DNS:** GoDaddy `rds.slejco.com` CNAME → `<app>.msappproxy.net`; internal AD DNS
+   `rds.slejco.com` A → the RD Gateway private IP (split-horizon).
+4. **Flip the farm to App Proxy mode** (Tier 0 owns the params — don't hand-edit):
+
+   ```bash
+   ./scripts/Initialize-RdsFarm.ps1 -UseAppProxy -AppProxyExternalFqdn rds.slejco.com \
+       -PublicGatewayFqdn rds.slejco.com   # ...plus your usual Tier 0 args
+   ```
+
+   This sets `useAppProxy=true` and points `appProxyExternalFqdn` / `publicGatewayFqdn` /
+   `certificateSubject` at `rds.slejco.com`.
+5. **Deploy** (`Invoke-ManualDeploy.ps1 -Action deploy`): no public IP/LB, no internet
+   inbound rules, a connector VM, and the gateway configured for Entra pre-auth.
+6. **Verify**, then decommission any leftover public IP / load balancer.
 
 ---
 
