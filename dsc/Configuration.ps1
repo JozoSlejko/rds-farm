@@ -263,7 +263,10 @@ configuration RDSDeployment {
         [string] $RDUserGroup        = 'Domain Users',
         [string] $DomainJoinUserName = '',
         [string] $KeyVaultCertSecretUri = '',
-        [string] $IdentityClientId      = ''
+        [string] $IdentityClientId      = '',
+        # App Proxy external URL for Entra pre-authentication. Empty = the
+        # public-LB path (no pre-auth); set by Tier 0 only when useAppProxy.
+        [string] $PreAuthServerUrl      = ''
     )
 
     Import-DscResource -ModuleName PSDesiredStateConfiguration
@@ -507,6 +510,39 @@ configuration RDSDeployment {
                     -CollectionName   $using:CollectionName `
                     -UserGroup        @($userGroupDownLevel) `
                     -ConnectionBroker $using:ConnectionBroker
+            }
+
+            DependsOn            = '[Script]Rds05_CreateCollection'
+            PsDscRunAsCredential = $AdminCreds
+        }
+
+        # Step 7 (App Proxy only): require Microsoft Entra pre-authentication on
+        # the collection, so the RD Web Client / native clients authenticate at
+        # the application proxy external URL (Conditional Access + MFA) before
+        # reaching the gateway. No-op while $PreAuthServerUrl is empty (the
+        # default public-LB path), so this is safe to ship before cutover.
+        Script Rds07_PreAuthCustomRdp {
+            GetScript = { @{ Result = '' } }
+
+            TestScript = {
+                if ([string]::IsNullOrEmpty($using:PreAuthServerUrl)) { return $true }
+                try {
+                    Import-Module RemoteDesktop -ErrorAction Stop
+                    $cfg = Get-RDSessionCollectionConfiguration -CollectionName $using:CollectionName -ConnectionBroker $using:ConnectionBroker -CustomRdpProperty -ErrorAction SilentlyContinue
+                    if ($null -eq $cfg -or [string]::IsNullOrEmpty($cfg.CustomRdpProperty)) { return $false }
+                    return ($cfg.CustomRdpProperty -match 'require pre-authentication:i:1')
+                } catch {
+                    return $false
+                }
+            }
+
+            SetScript = {
+                Import-Module RemoteDesktop
+                $rdp = "pre-authentication server address:s:{0}`nrequire pre-authentication:i:1" -f $using:PreAuthServerUrl
+                Set-RDSessionCollectionConfiguration `
+                    -CollectionName    $using:CollectionName `
+                    -CustomRdpProperty $rdp `
+                    -ConnectionBroker  $using:ConnectionBroker
             }
 
             DependsOn            = '[Script]Rds05_CreateCollection'
