@@ -337,6 +337,7 @@ The README above is the deployment guide. For deeper reference on a specific are
 | [CI/CD with GitHub Actions](docs/ci-cd.md) | Wiring up the included `.github/workflows/deploy.yml` (OIDC federated creds, RBAC, env approval). |
 | [Testing & verification](docs/testing.md) | Five-stage smoke tests from pre-deploy `what-if` to end-to-end client RDP. |
 | [Troubleshooting](docs/troubleshooting.md) | "Why doesn't this work?" — failures grouped by tier with the most likely fix. |
+| [Entra application proxy](docs/app-proxy.md) | **Design blueprint (not yet implemented).** Target architecture for replacing the public LB with Microsoft Entra application proxy: outbound-only connector, Entra pre-auth, vanity FQDN + Let's Encrypt cert. |
 
 ---
 
