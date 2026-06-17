@@ -10,6 +10,9 @@ param allowedClientSourceAddressPrefixes array
 @description('Name of the governance NSG already associated with the RDS subnet (landing-zone / Azure Policy managed), co-located in this module\'s resource group. The farm writes its client allow-list as named rules on this NSG instead of attaching its own NIC NSG. Leave empty to skip writing rules (the farm then applies no inbound allow-list of its own).')
 param subnetNsgName string = ''
 
+@description('Write the internet-facing client allow-list (TCP 443 / UDP 3391) on the subnet NSG. Set false when publishing through Entra application proxy - the connector dials outbound, so no internet inbound rules are needed.')
+param writeInternetInboundRules bool = true
+
 resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
   name: vnetName
 }
@@ -30,11 +33,13 @@ resource rdsSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existi
 // deployment start) - Tier 0 discovers it from the live subnet and writes it to
 // the bicepparam. When empty, rule creation is skipped and the farm applies no
 // inbound allow-list of its own.
-resource subnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' existing = if (!empty(subnetNsgName)) {
+var writeRules = !empty(subnetNsgName) && writeInternetInboundRules
+
+resource subnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' existing = if (writeRules) {
   name: subnetNsgName
 }
 
-resource allowHttps 'Microsoft.Network/networkSecurityGroups/securityRules@2024-05-01' = if (!empty(subnetNsgName)) {
+resource allowHttps 'Microsoft.Network/networkSecurityGroups/securityRules@2024-05-01' = if (writeRules) {
   parent: subnetNsg
   name: 'Allow-HTTPS-from-AllowedClients'
   properties: {
@@ -49,7 +54,7 @@ resource allowHttps 'Microsoft.Network/networkSecurityGroups/securityRules@2024-
   }
 }
 
-resource allowUdp3391 'Microsoft.Network/networkSecurityGroups/securityRules@2024-05-01' = if (!empty(subnetNsgName)) {
+resource allowUdp3391 'Microsoft.Network/networkSecurityGroups/securityRules@2024-05-01' = if (writeRules) {
   parent: subnetNsg
   name: 'Allow-UDP3391-from-AllowedClients'
   properties: {

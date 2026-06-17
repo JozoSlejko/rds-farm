@@ -125,6 +125,17 @@
     yourself, a jumpbox, etc. The value is written into main.bicepparam so
     deploys are deterministic and don't rely on the template default.
 
+.PARAMETER UseAppProxy
+    Publish through Microsoft Entra application proxy instead of a public load
+    balancer. When $true the farm skips the public IP + LB and internet inbound
+    NSG rules, deploys a connector VM, and configures the gateway for
+    -AppProxyExternalFqdn with Entra pre-authentication. Default $false. Written
+    to main.bicepparam (useAppProxy). See docs/app-proxy.md.
+
+.PARAMETER AppProxyExternalFqdn
+    External FQDN published by application proxy (e.g. rds.slejco.com). Required
+    when -UseAppProxy. Written to main.bicepparam (appProxyExternalFqdn).
+
 .PARAMETER ArtifactsStorageAccount
     Globally unique storage account name (3-24 chars, lowercase
     alphanumeric) that will be created to hold Configuration.zip. Required.
@@ -255,6 +266,14 @@ param(
     # band, a jumpbox, etc.). Written to main.bicepparam in Step 6 so the
     # script owns the value instead of leaving the template default.
     [bool]$DeployBastion = $true,
+
+    # Microsoft Entra application proxy. When -UseAppProxy the farm skips the
+    # public IP + load balancer and internet inbound NSG rules, deploys a
+    # connector VM, and configures the gateway for -AppProxyExternalFqdn with
+    # Entra pre-authentication. Both are written to main.bicepparam in Step 6.
+    # See docs/app-proxy.md.
+    [bool]$UseAppProxy = $false,
+    [string]$AppProxyExternalFqdn,
 
     # Prereqs
     [string]$ArtifactsStorageAccount,
@@ -565,6 +584,7 @@ $script:RdsFarmInitConfigSections = @(
     @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes','SubnetNsgName') }
     @{ Title = 'Gateway hostname'    ; Params = @('PublicGatewayFqdn','GatewayDnsLabelPrefix') }
     @{ Title = 'Bastion'             ; Params = @('DeployBastion') }
+    @{ Title = 'Application proxy'   ; Params = @('UseAppProxy','AppProxyExternalFqdn') }
     @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
     @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName') }
     @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
@@ -1319,6 +1339,9 @@ $stringPatches = [ordered]@{
     # (rds.contoso.com) survives, GatewayExternalFqdn != cert subject, and RDS
     # mints a competing self-signed gateway cert.
     publicGatewayFqdn                      = $PublicGatewayFqdn
+    # App Proxy external FQDN (empty unless -UseAppProxy). Drives the gateway
+    # external FQDN + pre-auth URL in main.bicep.
+    appProxyExternalFqdn                   = $AppProxyExternalFqdn
     rdsAccessGroup                         = $RdsAccessGroup
     artifactsLocation                      = $artifactsLocationUrl
     artifactsStorageAccountName            = $ArtifactsStorageAccount
@@ -1330,6 +1353,7 @@ foreach ($name in $stringPatches.Keys) {
 }
 $content = Update-BicepParamArray -Body $content -Name 'allowedClientSourceAddressPrefixes' -Values $AllowedClientSourceAddressPrefixes
 $content = Update-BicepParamBool  -Body $content -Name 'deployBastion' -Value $DeployBastion
+$content = Update-BicepParamBool  -Body $content -Name 'useAppProxy'   -Value $UseAppProxy
 
 Set-Content -LiteralPath $BicepParamFile -Value $content -Encoding utf8 -NoNewline
 $newLen = (Get-Item -LiteralPath $BicepParamFile).Length

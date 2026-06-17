@@ -107,6 +107,12 @@ param dscRevision string = utcNow()
 @description('Public FQDN clients type into Remote Desktop / RD Web (and what the cert Subject/SAN must match). Leave empty to use the LB DNS-label hostname (`<dnsLabel>.<region>.cloudapp.azure.com`) — only viable with a self-signed cert because a public CA will refuse to issue for `cloudapp.azure.com`. For production set this to a hostname you control, e.g. `rds.contoso.com`, and create a CNAME from that hostname to the LB FQDN after the first deploy.')
 param publicGatewayFqdn string = ''
 
+@description('Publish through Microsoft Entra application proxy instead of a public load balancer. When true the template skips the public IP + load balancer, omits the internet-facing inbound NSG rules, deploys an application proxy connector VM, and configures the gateway for the App Proxy external FQDN with Entra pre-authentication.')
+param useAppProxy bool = false
+
+@description('External FQDN published by Entra application proxy (the gateway external FQDN and pre-auth URL when useAppProxy = true), e.g. rds.slejco.com. Required when useAppProxy = true.')
+param appProxyExternalFqdn string = ''
+
 var namePrefix = 'rds'
 var tags = {
   workload: 'RemoteDesktopServices'
@@ -121,10 +127,14 @@ module network 'modules/network.bicep' = {
     rdsSubnetName: existingRdsSubnetName
     allowedClientSourceAddressPrefixes: allowedClientSourceAddressPrefixes
     subnetNsgName: subnetNsgName
+    // No internet-facing inbound rules when behind application proxy.
+    writeInternetInboundRules: !useAppProxy
   }
 }
 
-module loadbalancer 'modules/loadbalancer.bicep' = {
+// Public ingress (public IP + Standard LB). Skipped when publishing through
+// Entra application proxy - the connector dials out, so there is no public LB.
+module loadbalancer 'modules/loadbalancer.bicep' = if (!useAppProxy) {
   name: 'loadbalancer-core'
   params: {
     namePrefix: namePrefix
@@ -162,12 +172,14 @@ module identity 'modules/identity.bicep' = {
 }
 
 // Every VM gets the UAMI (used at minimum for blob auth in the DSC extension).
-var identityIdForVms       = identity.outputs.identityId
+var identityIdForVms = identity.outputs.identityId
 var identityClientIdForVms = identity.outputs.identityClientId
 
-// Public hostname users type and the cert validates against. Falls back to the
-// Azure-managed LB FQDN for lab/self-signed deployments.
-var effectiveGatewayFqdn = empty(publicGatewayFqdn) ? loadbalancer.outputs.gatewayFqdn : publicGatewayFqdn
+// Public hostname users type and the cert validates against. With application
+// proxy it's the external FQDN; otherwise the vanity FQDN or the LB hostname.
+var effectiveGatewayFqdn = useAppProxy
+  ? appProxyExternalFqdn
+  : (empty(publicGatewayFqdn) ? loadbalancer!.outputs.gatewayFqdn : publicGatewayFqdn)
 
 module gatewayVm 'modules/vm.bicep' = {
   name: 'vm-gateway-01'
@@ -177,7 +189,7 @@ module gatewayVm 'modules/vm.bicep' = {
     vmSize: vmSize
     windowsSku: windowsSku
     subnetId: network.outputs.rdsSubnetId
-    backendPoolId: loadbalancer.outputs.backendPoolId
+    backendPoolId: useAppProxy ? '' : loadbalancer!.outputs.backendPoolId
     adDnsServerIp: adDnsServerIp
     localAdminUserName: localAdminUserName
     localAdminPassword: localAdminPassword
@@ -218,14 +230,42 @@ module brokerVm 'modules/vm.bicep' = {
   }
 }
 
-module sessionHosts 'modules/vm.bicep' = [for i in range(0, sessionHostCount): {
-  name: 'deploy-rdsh-${i}'
+module sessionHosts 'modules/vm.bicep' = [
+  for i in range(0, sessionHostCount): {
+    name: 'deploy-rdsh-${i}'
+    params: {
+      vmName: '${sessionHostNamingPrefix}${padLeft(i + 1, 2, '0')}'
+      location: location
+      vmSize: vmSize
+      windowsSku: windowsSku
+      subnetId: network.outputs.rdsSubnetId
+      adDnsServerIp: adDnsServerIp
+      localAdminUserName: localAdminUserName
+      localAdminPassword: localAdminPassword
+      domainJoinUserName: domainJoinUserName
+      domainJoinPassword: domainJoinPassword
+      domainJoinOuPath: domainJoinOuPath
+      adDomainName: adDomainName
+      zone: availabilityZones[i % length(availabilityZones)]
+      tags: tags
+      userAssignedIdentityId: identityIdForVms
+      userAssignedIdentityClientId: identityClientIdForVms
+    }
+  }
+]
+
+// Entra application proxy connector VM (outbound-only). Deployed only in App
+// Proxy mode. The connector MSI install + registration is an admin step (it
+// needs an interactive Entra token) - see docs/app-proxy.md.
+module connectorVm 'modules/vm.bicep' = if (useAppProxy) {
+  name: 'vm-connector-01'
   params: {
-    vmName: '${sessionHostNamingPrefix}${padLeft(i + 1, 2, '0')}'
+    vmName: '${namePrefix}-apc-01'
     location: location
     vmSize: vmSize
     windowsSku: windowsSku
     subnetId: network.outputs.rdsSubnetId
+    backendPoolId: ''
     adDnsServerIp: adDnsServerIp
     localAdminUserName: localAdminUserName
     localAdminPassword: localAdminPassword
@@ -233,12 +273,13 @@ module sessionHosts 'modules/vm.bicep' = [for i in range(0, sessionHostCount): {
     domainJoinPassword: domainJoinPassword
     domainJoinOuPath: domainJoinOuPath
     adDomainName: adDomainName
-    zone: availabilityZones[i % length(availabilityZones)]
+    zone: availabilityZones[0]
     tags: tags
     userAssignedIdentityId: identityIdForVms
     userAssignedIdentityClientId: identityClientIdForVms
+    installCertFromKeyVault: false
   }
-}]
+}
 
 module gatewayDsc 'modules/dsc.bicep' = {
   name: 'dsc-gateway-01'
@@ -264,21 +305,23 @@ module gatewayDsc 'modules/dsc.bicep' = {
   }
 }
 
-module sessionHostDsc 'modules/dsc.bicep' = [for i in range(0, sessionHostCount): {
-  name: 'dsc-rdsh-${i}'
-  params: {
-    vmName: sessionHosts[i].outputs.vmName
-    location: location
-    configurationFunction: 'Configuration.ps1\\SessionHost'
-    configurationProperties: {
-      DomainName: adDomainName
-      DomainJoinUserName: domainJoinUserName
+module sessionHostDsc 'modules/dsc.bicep' = [
+  for i in range(0, sessionHostCount): {
+    name: 'dsc-rdsh-${i}'
+    params: {
+      vmName: sessionHosts[i].outputs.vmName
+      location: location
+      configurationFunction: 'Configuration.ps1\\SessionHost'
+      configurationProperties: {
+        DomainName: adDomainName
+        DomainJoinUserName: domainJoinUserName
+      }
+      artifactsLocation: artifactsLocation
+      userAssignedIdentityClientId: identityClientIdForVms
+      forceUpdateTag: dscRevision
     }
-    artifactsLocation: artifactsLocation
-    userAssignedIdentityClientId: identityClientIdForVms
-    forceUpdateTag: dscRevision
   }
-}]
+]
 
 module brokerDsc 'modules/dsc.bicep' = {
   name: 'dsc-broker-01'
@@ -306,6 +349,8 @@ module brokerDsc 'modules/dsc.bicep' = {
       // local private key as non-exportable, so export-from-store fails.
       KeyVaultCertSecretUri: keyVaultCertSecretUri
       IdentityClientId: identityClientIdForVms
+      // Activates the gated Rds07 pre-auth step only in App Proxy mode.
+      PreAuthServerUrl: useAppProxy ? 'https://${appProxyExternalFqdn}/' : ''
     }
     protectedItems: {
       AdminCreds: {
@@ -319,7 +364,8 @@ module brokerDsc 'modules/dsc.bicep' = {
   }
 }
 
-output gatewayFqdn string = loadbalancer.outputs.gatewayFqdn
+output gatewayFqdn string = useAppProxy ? '' : loadbalancer!.outputs.gatewayFqdn
 output publicGatewayFqdn string = effectiveGatewayFqdn
 output rdWebUrl string = 'https://${effectiveGatewayFqdn}/RDWeb'
 output bastionName string = deployBastion ? bastion!.outputs.bastionName : ''
+output connectorVmName string = useAppProxy ? connectorVm!.outputs.vmName : ''
