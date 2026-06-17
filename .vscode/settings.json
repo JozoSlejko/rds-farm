@@ -1,0 +1,23 @@
+{
+  "powershell.scriptAnalysis.settingsPath": "PSScriptAnalyzerSettings.psd1",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "[markdown]": {
+    "files.trimTrailingWhitespace": false
+  },
+  "[bicep]": {
+    "editor.tabSize": 2,
+    "editor.formatOnSave": true
+  },
+  "[bicep-params]": {
+    "editor.tabSize": 2
+  },
+  "[powershell]": {
+    "editor.tabSize": 4
+  },
+  "search.exclude": {
+    "**/main.json": true,
+    "**/tier0.json": true,
+    "**/*.bicepparam.bak": true
+  }
+}

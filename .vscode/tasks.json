@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Bicep: build main",
+      "type": "shell",
+      "command": "az bicep build main.bicep",
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "Bicep: build prereqs (tier0)",
+      "type": "shell",
+      "command": "az bicep build prereqs/tier0.bicep",
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: DSC configuration",
+      "type": "shell",
+      "command": "pwsh -NoProfile -File ./tests/Test-DscConfiguration.ps1",
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: bicepparam values",
+      "type": "shell",
+      "command": "pwsh -NoProfile -File ./tests/Test-BicepParamValues.ps1",
+      "options": { "env": { "DOMAIN_JOIN_PASSWORD": "dummy", "LOCAL_ADMIN_PASSWORD": "dummy" } },
+      "problemMatcher": []
+    },
+    {
+      "label": "PSSA: scripts + tests",
+      "type": "shell",
+      "command": "pwsh -NoProfile -Command \"Invoke-ScriptAnalyzer -Path scripts -Recurse -Settings ./PSScriptAnalyzerSettings.psd1; Invoke-ScriptAnalyzer -Path tests -Recurse -Settings ./PSScriptAnalyzerSettings.psd1\"",
+      "problemMatcher": []
+    }
+  ]
+}
