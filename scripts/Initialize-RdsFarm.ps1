@@ -427,8 +427,10 @@ function Read-OptionalSwitch {
 
 function Get-DefaultDnsLabel {
     param([string]$Fqdn)
-    $first = ($Fqdn -split '\.')[0]
-    return ($first -replace '[^a-z0-9-]', '' -replace '^-+','' -replace '-+$','').ToLowerInvariant()
+    # Lowercase first, THEN strip invalid chars - otherwise an uppercase first
+    # label (e.g. 'RDS.contoso.com') would have all its letters stripped to ''.
+    $first = ($Fqdn -split '\.')[0].ToLowerInvariant()
+    return ($first -replace '[^a-z0-9-]', '' -replace '^-+','' -replace '-+$','')
 }
 
 function Test-FqdnFormat {
