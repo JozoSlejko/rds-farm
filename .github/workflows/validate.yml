@@ -96,6 +96,17 @@ jobs:
           Write-Host "PSScriptAnalyzer: $($errs.Count) error(s), $($warns.Count) warning(s)."
           if ($errs.Count) { exit 1 }
 
+      - name: Pester unit tests (tests/unit)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = 'tests/unit'
+          $cfg.Run.Throw = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $cfg
+
   dsc-parse:
     name: DSC parse (Windows PowerShell 5.1)
     runs-on: windows-latest

@@ -1,0 +1,22 @@
+{
+  "name": "rds-farm",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/azure-cli:1": {},
+    "ghcr.io/devcontainers/features/powershell:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+  "postCreateCommand": "az bicep install && pwsh -NoProfile -Command \"Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module PSScriptAnalyzer, Pester -Scope CurrentUser -Force -SkipPublisherCheck\" && npm install -g markdownlint-cli2",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-bicep",
+        "ms-vscode.powershell",
+        "davidanson.vscode-markdownlint",
+        "editorconfig.editorconfig",
+        "github.vscode-github-actions"
+      ]
+    }
+  }
+}
