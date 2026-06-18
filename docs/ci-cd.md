@@ -76,7 +76,7 @@ The pipeline's service principal (created by Tier 0) holds these roles. The firs
 #   gh auth login --scopes repo            # GitHub CLI with repo scope
 
 cd C:\Users\jozoslejko\OneDrive\Dev\rds-farm
-.\scripts\Initialize-CiPrerequisites.ps1 -GitHubRepo '<org>/<repo>' -RequireProductionApproval
+.\scripts\Initialize-CiPrerequisites.ps1 -GitHubRepo '<org>/<repo>' -GhRequireProductionApproval
 ```
 
 What the script does (each step is safe to re-run):

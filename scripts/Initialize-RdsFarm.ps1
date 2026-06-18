@@ -43,7 +43,7 @@
     Step 1 answers persist: at the end of Step 1 every collected value is
     written to a .psd1 config file (default: <repo>/.rds-farm-init.config.psd1).
     The next run loads it as defaults so you can press Enter through every
-    -Interactive prompt. CLI parameters always override the file. Secrets
+    prompt. CLI parameters always override the file. Secrets
     (DOMAIN_JOIN_PASSWORD, LOCAL_ADMIN_PASSWORD, cert passwords) are never
     written there.
 
@@ -258,8 +258,8 @@
         -ArtifactsStorageAccount contosordsart01 -KeyVaultName contoso-rds-kv01
 
 .EXAMPLE
-    # Guided tour — also prompts for every optional value (defaults pre-filled).
-    .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm-lab' -Interactive
+    # Guided tour — interactive by default: prompts for every value (defaults pre-filled).
+    .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm-lab'
 
 .NOTES
     Required tooling on the machine running this script:
@@ -450,7 +450,7 @@ function Read-RequiredString {
 function Read-RequiredStringArray {
     <#
         Prompt for one-or-more comma/space-separated tokens. Returns a string[].
-        Pass -Default to pre-fill (in -Interactive re-prompt mode): the
+        Pass -Default to pre-fill (in interactive re-prompt mode): the
         bracketed default is shown joined by commas; pressing Enter accepts it.
     #>
     param(
@@ -476,7 +476,7 @@ function Read-RequiredStringArray {
 
 function Read-OptionalString {
     <#
-        Used by -Interactive mode for parameters that already have a default
+        Used by interactive mode for parameters that already have a default
         (or that legitimately may be empty, e.g. DomainJoinOuPath). Press Enter
         to keep $Default; type a new value to override. Always returns a string
         (never $null), so '' is a valid "keep empty" answer.
@@ -498,7 +498,7 @@ function Read-OptionalString {
 
 function Read-OptionalSwitch {
     <#
-        Yes/no prompt for -Interactive mode. Pressing Enter keeps $Default.
+        Yes/no prompt for interactive mode. Pressing Enter keeps $Default.
         Accepts y/yes/true/1 and n/no/false/0 (case-insensitive). The capital
         letter in the [Y/n] / [y/N] hint indicates the current default.
     #>
@@ -654,7 +654,7 @@ function Get-MyObjectId {
 # Ordered list of (sectionTitle, paramNames) used by BOTH the loader (to know
 # which variables to overlay) and the writer (to control section grouping and
 # write order). Anything NOT in this list is never persisted - in particular
-# UX/meta params like -Interactive, -ConfigFile, -NoSaveConfig.
+# UX/meta params like -NonInteractive, -ConfigFile, -NoSaveConfig.
 $script:RdsFarmInitConfigSections = @(
     @{ Title = 'GitHub & Azure scope'; Params = @('GitHubRepo','SubscriptionId','Location') }
     @{ Title = 'Active Directory'    ; Params = @('AdDomainName','AdDnsServerIp','DomainJoinUserName','DomainJoinOuPath','LocalAdminUserName','RdsAccessGroup') }
@@ -833,10 +833,10 @@ foreach ($p in @($initCi, $newCert, $prereqs)) {
 Write-Host ""
 Write-Host "==> Step 1: Collect inputs" -ForegroundColor Green
 if ($Interactive) {
-    Write-Host "    -Interactive mode: prompting for every parameter (saved/CLI values pre-filled)." -ForegroundColor Yellow
+    Write-Host "    Prompting for every parameter (saved/CLI values pre-filled)." -ForegroundColor Yellow
+    Write-Host "    (Tip: pass -NonInteractive to only be asked for required values you didn't supply.)"
 } else {
-    Write-Host "    Anything you didn't pass on the command line is asked for here."
-    Write-Host "    (Tip: re-run with -Interactive to also be prompted for every saved/optional value.)"
+    Write-Host "    -NonInteractive mode: only asking for required values you didn't pass on the command line."
 }
 Write-Host "    Press Enter to accept the bracketed default. Required fields keep asking until filled."
 Write-Host ""
@@ -845,7 +845,7 @@ Write-Host ""
 # Interactive optionals — every parameter with a built-in default. Each
 # prompt pre-fills the current value as the [bracketed] default, so a
 # pure 'Enter, Enter, Enter…' run is equivalent to a non-interactive
-# call. Skipped entirely when -Interactive is not set.
+# call. Skipped entirely under -NonInteractive.
 # -------------------------------------------------------------------------
 if ($Interactive) {
     Write-Host "    --- Optional values (press Enter to keep default) -------------" -ForegroundColor DarkGray
@@ -950,7 +950,7 @@ if ($Interactive) {
 
 # GitHubRepo can come from CLI, config file, or this prompt. CLI values are
 # validated by [ValidatePattern] at bind time; config / prompt values are not,
-# so re-validate manually and re-prompt on a bad value. In -Interactive mode we
+# so re-validate manually and re-prompt on a bad value. In interactive mode we
 # also re-prompt with the loaded value as the default so users can edit it
 # without retyping (and so the prompt sequence matches a fresh first-run).
 if ($GitHubRepo -and -not ($GitHubRepo -match '^[^/]+/[^/]+$')) {

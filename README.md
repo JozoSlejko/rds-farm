@@ -139,6 +139,7 @@ A single script orchestrates everything Tier 0 needs. It calls the focused per-a
 ```powershell
 ./scripts/Initialize-RdsFarm.ps1 `
     -GitHubRepo 'contoso/rds-farm' `
+    -Location italynorth `
     -AdDomainName contoso.local -AdDnsServerIp 10.10.0.4 `
     -RdsAccessGroup 'RDS-Users' `
     -ExistingVnetName corp-vnet `
@@ -149,10 +150,11 @@ A single script orchestrates everything Tier 0 needs. It calls the focused per-a
     -ArtifactsStorageAccount contosordsart01 `
     -KeyVaultName contoso-rds-kv01 `
     -CertMode Csr `
-    -RequireProductionApproval
+    -GhRequireProductionApproval `
+    -NonInteractive
 ```
 
-Any required value you omit is prompted for interactively (with sensible defaults shown in brackets). Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -CertMode SelfSigned` — the script asks for the rest. Add `-Interactive` to also be prompted for every *optional* parameter (defaults pre-filled).
+By default the script is **interactive**: it prompts for every parameter (required and optional) with the current value shown in brackets — press Enter to keep each. Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -Location italynorth -CertMode SelfSigned` — the script asks for the rest. Add `-NonInteractive` for a scripted run that only prompts for missing *required* values and uses defaults for the rest.
 
 In one pass it wires GitHub Actions, deploys the prereq Azure resources, issues the TLS cert in Key Vault, and writes a fully populated `main.bicepparam`. You don't hand-edit the bicepparam afterwards. Per-step breakdown: [`docs/manual-checklist.md`](docs/manual-checklist.md).
 
@@ -175,8 +177,8 @@ Required values are marked **yes**. Anything else has a sensible default — omi
 | `-ExistingVnetResourceGroup` | **yes** | — | Resource group of the existing VNet. |
 | `-ExistingRdsSubnetName` | **yes** | — | Subnet for the RDS VMs. |
 | `-AllowedClientSourceAddressPrefixes` | **yes** | — | `string[]` of CIDRs allowed to reach TCP 443 / UDP 3391. **Never `0.0.0.0/0`.** |
-| `-PublicGatewayFqdn` | **yes** for `Csr` / `ImportPfx` — optional for `SelfSigned` | for `SelfSigned`, derived from `-GatewayDnsLabelPrefix` + `-Location` as `<label>.<region>.cloudapp.azure.com` | Public hostname clients type. Must match the TLS cert Subject / SAN. Public CAs cannot sign for `cloudapp.azure.com`, so a vanity FQDN is required outside the self-signed lab path. |
-| `-GatewayDnsLabelPrefix` | **yes** for `SelfSigned` without `-PublicGatewayFqdn`, otherwise no | sanitised `-PublicGatewayFqdn` (vanity path) / from the repo name (lab path, prompted) | DNS label for the Azure-managed PIP hostname. Must be globally unique. |
+| `-PublicGatewayFqdn` | **yes** for `Csr` / `ImportPfx` / `LetsEncrypt` — optional for `SelfSigned` | for `SelfSigned`, derived from `-GatewayDnsLabelPrefix` + `-Location` as `<label>.<region>.cloudapp.azure.com` | The single external hostname clients type, used by **both** modes. Must match the TLS cert Subject / SAN. In App Proxy mode (`-UseAppProxy` / `-CertMode LetsEncrypt`) it's the FQDN App Proxy publishes. Public CAs cannot sign for `cloudapp.azure.com`, so a vanity FQDN is required outside the self-signed lab path. |
+| `-GatewayDnsLabelPrefix` | **yes** for `SelfSigned` without `-PublicGatewayFqdn`, otherwise no | sanitised `-PublicGatewayFqdn` (vanity path) / from the repo name (lab path, prompted) | DNS label for the Azure-managed PIP hostname (LB mode only — unused with `-UseAppProxy`, which has no public IP). Must be globally unique. |
 | `-ArtifactsStorageAccount` | **yes** | — | Globally unique storage account name (3–24 chars, lowercase alphanumeric) for `Configuration.zip`. |
 | `-KeyVaultName` | **yes** | — | Globally unique Key Vault name (3–24 chars) for the TLS cert. |
 | `-ArtifactsResourceGroup` | no | `rds-artifacts-rg` | RG for the artifacts SA. |
@@ -184,17 +186,16 @@ Required values are marked **yes**. Anything else has a sensible default — omi
 | `-CertMode` | **yes** | — | `Csr` (production, two-pass) / `ImportPfx` / `SelfSigned` / `LetsEncrypt` (App Proxy DV cert via DNS-01; implies `-UseAppProxy`). Full mode comparison: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md). |
 | `-PfxPath` | only when `-CertMode ImportPfx` | — | Path to the existing `.pfx` file. Password prompted as `SecureString`. |
 | `-CertName` | no | `rds-tls` | Name of the cert object in Key Vault. |
-| `-UseAppProxy` | no | `false` | Publish through Microsoft Entra application proxy (outbound-only connector + Entra pre-auth; no public IP / load balancer) instead of the public LB. Implied by `-CertMode LetsEncrypt`. Written to `main.bicepparam` (`useAppProxy`). See [`docs/app-proxy.md`](docs/app-proxy.md). |
-| `-AppProxyExternalFqdn` | **yes** when `-UseAppProxy` | — | External vanity hostname App Proxy publishes (e.g. `rds.contoso.com`); also the cert FQDN / subject in App Proxy mode. Written to `main.bicepparam` (`appProxyExternalFqdn`). |
+| `-UseAppProxy` | no | `false` | Publish through Microsoft Entra application proxy (outbound-only connector + Entra pre-auth; no public IP / load balancer) instead of the public LB. Implied by `-CertMode LetsEncrypt`. The external FQDN is `-PublicGatewayFqdn`. Written to `main.bicepparam` (`useAppProxy`). See [`docs/app-proxy.md`](docs/app-proxy.md). |
 | `-AcmeContactEmail` | **yes** for `-CertMode LetsEncrypt` | — | Email for the Let's Encrypt account (cert-expiry notices). |
-| `-AcmeDnsZoneName` | no | `acme.<parent of -AppProxyExternalFqdn>` | Azure DNS public zone holding the ACME challenge TXT, delegated from your registrar. Only for `-CertMode LetsEncrypt`. |
+| `-AcmeDnsZoneName` | no | `acme.<parent of -PublicGatewayFqdn>` | Azure DNS public zone holding the ACME challenge TXT, delegated from your registrar. Only for `-CertMode LetsEncrypt`. |
 | `-AcmeDnsResourceGroup` | no | `rds-dns-rg` | Resource group for the ACME challenge zone (created if missing). Only for `-CertMode LetsEncrypt`. |
-| `-AppDisplayName` | no | `gh-rds-farm-deploy` | Display name for the Entra app the pipeline uses. |
-| `-RequireProductionApproval` | switch | off | Mark the `production` GitHub environment as requiring approval from the current `gh` user. Requires GH Pro/Team/Enterprise on private repos. |
+| `-GhAppDisplayName` | no | `gh-rds-farm-deploy` | Display name for the Entra app the GitHub pipeline uses. |
+| `-GhRequireProductionApproval` | switch | off | Mark the `production` GitHub environment as requiring approval from the current `gh` user. Requires GH Pro/Team/Enterprise on private repos. |
 | `-BicepParamFile` | no | `<repo>/main.bicepparam` | Path to the bicepparam to patch. |
-| `-SkipCiBootstrap` | switch | off | Skip CI wiring (use only when `Initialize-CiPrerequisites.ps1` already ran successfully). |
+| `-GhSkipCiBootstrap` | switch | off | Skip CI wiring (use only when `Initialize-CiPrerequisites.ps1` already ran successfully). |
 | `-SkipPrereqsDeploy` | switch | off | Skip the prereqs Bicep (use only when KV + SA already exist and you pass their names). |
-| `-Interactive` | switch | off | Also prompt for every **optional** parameter above (defaults pre-filled — press Enter to keep each). Without this switch only the required values are prompted; optionals silently use their defaults. |
+| `-NonInteractive` | switch | off (interactive by default) | By default the script prompts for **every** parameter (defaults pre-filled — press Enter to keep each). Pass `-NonInteractive` to skip optional prompts and only ask for missing **required** values (CI/CD-friendly). |
 
 `Get-Help ./scripts/Initialize-RdsFarm.ps1 -Full` shows the same set with extended notes.
 

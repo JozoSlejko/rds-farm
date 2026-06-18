@@ -270,21 +270,22 @@ enterprise app for defense-in-depth.
 
 ### Phase 2 — Bicep `useAppProxy` flag ✅
 
-- ✅ `main.bicep` — `useAppProxy` / `appProxyExternalFqdn`; the public IP + load
-  balancer become `if (!useAppProxy)`; a connector VM (reusing `modules/vm.bicep`,
-  which already does domain-join + optional identity + optional backend pool);
-  `PreAuthServerUrl` wired into the broker DSC; conditional outputs via the `!` pattern.
+- ✅ `main.bicep` — `useAppProxy`; `publicGatewayFqdn` is the external FQDN in both
+  modes; the public IP + load balancer become `if (!useAppProxy)`; a connector VM
+  (reusing `modules/vm.bicep`, which already does domain-join + optional identity +
+  optional backend pool); `PreAuthServerUrl` wired into the broker DSC; conditional
+  outputs via the `!` pattern.
 - ✅ `modules/network.bicep` — `writeInternetInboundRules` (= `!useAppProxy`) gates
   the two internet-facing inbound NSG rules.
-- ✅ `scripts/Initialize-RdsFarm.ps1` (Tier 0) — `-UseAppProxy` / `-AppProxyExternalFqdn`
-  (+ Step 6 bicepparam patching).
-- ✅ `main.bicepparam` — declares `useAppProxy` / `appProxyExternalFqdn`; Tier 0 owns the values.
+- ✅ `scripts/Initialize-RdsFarm.ps1` (Tier 0) — `-UseAppProxy` (+ `-PublicGatewayFqdn`
+  + Step 6 bicepparam patching).
+- ✅ `main.bicepparam` — declares `useAppProxy`; Tier 0 owns the value.
 
 ### Phase 3 — Docs + tests
 
 - ✅ This page (status + cutover runbook below).
-- ✅ `tests/Test-BicepParamValues.ps1` — App Proxy invariant (valid `appProxyExternalFqdn`,
-  `publicGatewayFqdn` == external FQDN).
+- ✅ `tests/Test-BicepParamValues.ps1` — App Proxy invariant (valid `publicGatewayFqdn`
+  when `useAppProxy`).
 - ✅ `tests/Test-PostDeployHealth.ps1` — skips the public-LB checks and resolves the
   App Proxy external FQDN when `useAppProxy`.
 - ✅ README architecture diagram + "What it deploys" table.
@@ -331,7 +332,7 @@ the ACME zone and alias from the FQDN, so in practice you pass very little.
 
 | Placeholder | This farm (worked example) | Where yours comes from |
 | --- | --- | --- |
-| External / vanity FQDN | `rds.slejco.com` | `appProxyExternalFqdn` in `main.bicepparam` (set by the Tier 0 flip in step 6), or `-Fqdn` |
+| External / vanity FQDN | `rds.slejco.com` | `publicGatewayFqdn` in `main.bicepparam` (set by Tier 0), or `-Fqdn` |
 | Public DNS host (registrar) | GoDaddy, zone `slejco.com` | wherever your domain's public DNS is hosted |
 | ACME challenge zone (Azure DNS) | `acme.slejco.com` | derived as `acme.<parent of FQDN>`; override with `-AcmeDnsZoneName` |
 | ACME challenge alias | `rds.acme.slejco.com` | derived as `<first label of FQDN>.<acme zone>`; override with `-DnsAlias` |
@@ -359,7 +360,7 @@ and publishes the App Proxy app. The DNS-01 challenge uses your current `az logi
 ```powershell
 # Run 1 - creates acme.<domain> in Azure DNS and prints the registrar records, then halts.
 ./scripts/Initialize-RdsFarm.ps1 -GitHubRepo me/rds-farm `
-    -CertMode LetsEncrypt -AppProxyExternalFqdn rds.slejco.com `
+    -CertMode LetsEncrypt -PublicGatewayFqdn rds.slejco.com `
     -AcmeContactEmail you@slejco.com -RdsAccessGroup 'RDS-Users'
     # ...plus your usual Tier 0 args (VNet, AD, storage, Key Vault, ...)
 
@@ -367,7 +368,7 @@ and publishes the App Proxy app. The DNS-01 challenge uses your current `az logi
 
 # Run 2 - issues the cert, imports it to Key Vault, and publishes the App Proxy app.
 ./scripts/Initialize-RdsFarm.ps1 -GitHubRepo me/rds-farm `
-    -CertMode LetsEncrypt -AppProxyExternalFqdn rds.slejco.com `
+    -CertMode LetsEncrypt -PublicGatewayFqdn rds.slejco.com `
     -AcmeContactEmail you@slejco.com -RdsAccessGroup 'RDS-Users'
 ```
 
@@ -462,7 +463,7 @@ $cert = ./scripts/New-LetsEncryptRdsCertificate.ps1 -Fqdn rds.slejco.com -Contac
 vanity hostname; the script derives the `acme.slejco.com` challenge zone and the
 `rds.acme.slejco.com` alias from it (override with `-AcmeDnsZoneName` / `-DnsAlias`)
 and reads the Key Vault from `main.bicepparam`. You can drop `-Fqdn` once the Tier 0
-flip in step 6 has set `appProxyExternalFqdn` — until then, pass it explicitly.
+flip in step 6 has set `publicGatewayFqdn` — until then, pass it explicitly.
 
 **Result:** the real run imports the cert into Key Vault secret `rds-tls` and
 stages a PFX file. The returned `$cert` object holds `$cert.PfxPath` and
@@ -508,25 +509,24 @@ Two actions, in order.
 
 **6a — Set the App Proxy parameters via Tier 0.** Tier 0
 (`Initialize-RdsFarm.ps1`) owns `main.bicepparam`; never hand-edit that file. Pass
-the three App Proxy flags **plus the exact same arguments you used on your first
+the App Proxy flags **plus the exact same arguments you used on your first
 Tier 0 run** (VNet, AD, storage, cert, etc. — the full command is in the
 [README deployment guide](../README.md#deployment-guide)):
 
 ```powershell
-# Re-run your original Tier 0 command, adding the three App Proxy flags:
+# Re-run your original Tier 0 command, adding the App Proxy flag:
 ./scripts/Initialize-RdsFarm.ps1 -UseAppProxy `
-    -AppProxyExternalFqdn rds.slejco.com `
     -PublicGatewayFqdn rds.slejco.com `
     -GitHubRepo 'owner/repo' -AdDomainName slejco.com   # ...and the rest of your Tier 0 args
 ```
 
 - `-UseAppProxy` turns App Proxy mode on.
-- `-AppProxyExternalFqdn` is the external hostname users type.
-- `-PublicGatewayFqdn` is set to the **same** value so internal and external
-  FQDNs match (the HTML5 web client requires that).
+- `-PublicGatewayFqdn` is the single external hostname users type — used for both
+  the cert subject and the App Proxy external URL (internal == external, which the
+  HTML5 web client requires).
 
-This writes `useAppProxy=true` and points `appProxyExternalFqdn`, `publicGatewayFqdn`,
-and `certificateSubject` at `rds.slejco.com` in `main.bicepparam`.
+This writes `useAppProxy=true` and points `publicGatewayFqdn` and
+`certificateSubject` at `rds.slejco.com` in `main.bicepparam`.
 
 **6b — Deploy.** `<sa>` is your artifacts storage account name and `<rg>` is the
 farm's resource group — the same two values you pass on every deploy:

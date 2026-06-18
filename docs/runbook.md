@@ -72,6 +72,7 @@ governance NSG name).
 ```powershell
 ./scripts/Initialize-RdsFarm.ps1 `
     -GitHubRepo 'contoso/rds-farm' `
+    -Location italynorth `
     -AdDomainName contoso.local -AdDnsServerIp 10.10.0.4 `
     -RdsAccessGroup 'RDS-Users' `
     -ExistingVnetName corp-vnet `
@@ -84,9 +85,9 @@ governance NSG name).
     -CertMode Csr
 ```
 
-- Omit any required value and the script prompts (defaults shown in brackets). Add `-Interactive`
-  to be prompted for every optional value too.
-- Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -CertMode SelfSigned`.
+- By default the script prompts for every parameter (defaults shown in brackets — press Enter to keep). Add `-NonInteractive`
+  for a scripted run that only prompts for missing *required* values.
+- Lab shortcut: `./scripts/Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm' -Location italynorth -CertMode SelfSigned`.
 - **`Csr` mode is two-pass:** the first run emits a CSR and stops; submit it to your CA, then
   re-run Tier 0 (or `New-RdsCertificate.ps1 -MergeSignedCert <signed.cer>`) to finish.
 
