@@ -13,9 +13,9 @@ sign-in: each box is one action, ordered by when it runs.
 | Legend | Meaning |
 | --- | --- |
 | **Prerequisites** | Lives outside Azure (AD, networking, DNS). No script can create these for you. |
-| **Tier 0** | One-time bootstrap on your laptop. Driven by a single orchestrator script. |
-| **Tier 1** | Runs every time you change code. Deploy from a **laptop/jumpbox with VNet line-of-sight** — the GitHub-hosted pipeline can't reach the private-endpoint-only KV/SA. |
-| **Tier 2** | Ad-hoc post-deploy operations. |
+| **Tier 0** | One-time bootstrap, from an **in-VNet host** (jumpbox / DC). The cert step imports into the private-endpoint-only Key Vault, so it needs VNet line-of-sight. |
+| **Tier 1** | Runs every time you change code. Same **in-VNet host** — the GitHub-hosted pipeline can't reach the private-endpoint-only KV/SA. |
+| **Tier 2** | Ad-hoc post-deploy operations, from the same **in-VNet host**. |
 
 ---
 
@@ -30,7 +30,7 @@ sign-in: each box is one action, ordered by when it runs.
 - [ ] **Public hostname strategy decided.** Vanity CNAME like `rds.contoso.com` (production — requires a public-CA cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md).
 - [ ] **Cert mode decided.** `Csr` (Tier 0 generates a CSR, you submit to your CA, re-run with the signed cert), `ImportPfx` (you already have a `.pfx`), or `SelfSigned` (lab only). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md#decision-2--pick-the-cert-mode).
 
-### Laptop tooling for Tier 0
+### Tooling on the in-VNet host (Tier 0)
 
 - [ ] **PowerShell 7+** installed.
 - [ ] **Azure CLI signed in:** `az login` (use `--tenant <id>` if needed). You must be Owner on the target subscription.

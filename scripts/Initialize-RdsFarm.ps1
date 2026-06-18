@@ -1567,7 +1567,7 @@ Write-Host ""
 Write-Host "Verify Tier 0 (one command, read-only):" -ForegroundColor Cyan
 Write-Host "  ./tests/Test-RdsFarmInit.ps1 -GitHubRepo $GitHubRepo"
 Write-Host ""
-Write-Host "Next steps (Tier 1 — deploy from a laptop/jumpbox with VNet line-of-sight):" -ForegroundColor Cyan
+Write-Host "Next steps (Tier 1 — deploy from this same in-VNet host):" -ForegroundColor Cyan
 Write-Host "  ./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount $ArtifactsStorageAccount"
 Write-Host "  ./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount $ArtifactsStorageAccount"
 Write-Host ""
@@ -1576,7 +1576,7 @@ Write-Host "    git add main.bicepparam && git commit -m 'Initialize farm config
 Write-Host ""
 Write-Host "  Note: the GitHub Actions pipeline can't deploy from a GitHub-hosted runner" -ForegroundColor DarkGray
 Write-Host "  (artifacts SA + Key Vault are private-endpoint-only). It needs a self-hosted" -ForegroundColor DarkGray
-Write-Host "  runner inside the VNet. Until then, use the laptop/jumpbox commands above." -ForegroundColor DarkGray
+Write-Host "  runner inside the VNet. Until then, run the commands above from this in-VNet host." -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "After the first successful deploy (Tier 2 — once):" -ForegroundColor Cyan
 Write-Host "  1. Public DNS: CNAME $PublicGatewayFqdn -> <gatewayFqdn output>"

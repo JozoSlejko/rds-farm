@@ -70,7 +70,7 @@ Full design and cutover runbook: [docs/app-proxy.md](docs/app-proxy.md).
 
 ## Deployment guide
 
-The flow is **prerequisites → Tier 0 → Tier 1 → Tier 2**. Tier 1 (the actual farm deploy) runs from a laptop or jumpbox with line-of-sight to the VNet — see the note below on why the GitHub Actions pipeline can't run it today.
+The flow is **prerequisites → Tier 0 → Tier 1 → Tier 2**. **Every tier runs from one host inside the VNet** (a jumpbox, the DC, or a VM via Bastion): the prereq Key Vault and storage account are private-endpoint-only, so a plain laptop can't reach them — see the note below.
 
 ```mermaid
 flowchart LR
@@ -78,15 +78,15 @@ flowchart LR
         direction TB
         AD["AD account + RDS access group<br/>VNet + subnet<br/>Allowed client CIDRs<br/>Gateway hostname + cert plan"]
     end
-    subgraph T0["Tier 0 — Bootstrap (one command, one time)"]
+    subgraph T0["Tier 0 — Bootstrap (one command, in-VNet)"]
         direction TB
         BS["scripts/Initialize-RdsFarm.ps1<br/>→ CI wiring (Entra app, GH secrets, envs)<br/>→ Prereq Azure (KV + storage SA)<br/>→ TLS cert in Key Vault<br/>→ Patches main.bicepparam<br/>→ Sets ARTIFACTS_STORAGE_ACCOUNT var"]
     end
-    subgraph T1["Tier 1 — Deploy (every change, laptop/jumpbox in-VNet)"]
+    subgraph T1["Tier 1 — Deploy (every change, in-VNet)"]
         direction TB
         WF["scripts/Invoke-ManualDeploy.ps1<br/>package DSC → upload (MSI) → pre-flight<br/>→ what-if → deploy → post-deploy tests"]
     end
-    subgraph T2["Tier 2 — Post-deploy (ad-hoc, manual)"]
+    subgraph T2["Tier 2 — Post-deploy (ad-hoc, in-VNet)"]
         direction TB
         DNS["Set-GatewayCname.ps1 (CNAME)<br/>RDS CALs · AD broker group<br/>Smoke tests · Remove-RdsFarm.ps1"]
     end
@@ -97,18 +97,22 @@ flowchart LR
 | Phase | When | Where | Goal |
 | --- | --- | --- | --- |
 | **Prerequisites** | Before anything | AD / network / DNS — outside Azure | Things this repo can't create for you (AD account + group, VNet + subnet, client CIDRs, hostname plan). |
-| **Tier 0 — Bootstrap** | Once, before first deploy | Laptop (VPN / jumpbox for the cert step) | One script ([`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1)) does it all: GitHub Actions wiring, Azure prereq RGs/KV/SA, TLS cert, fully patched `main.bicepparam`. |
-| **Tier 1 — Deploy** | Every code change | **Laptop / jumpbox with VNet line-of-sight** | `package DSC → upload (MSI) → pre-flight → what-if → deploy → post-deploy tests`. |
-| **Tier 2 — Post-deploy** | Ad-hoc | Your laptop | Public CNAME, RDS CALs activation, AD `Terminal Server License Servers` membership, smoke tests, tear-down. |
+| **Tier 0 — Bootstrap** | Once, before first deploy | In-VNet host (jumpbox / DC) | One script ([`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1)) does it all: GitHub Actions wiring, Azure prereq RGs/KV/SA, TLS cert, fully patched `main.bicepparam`. |
+| **Tier 1 — Deploy** | Every code change | In-VNet host (jumpbox / DC) | `package DSC → upload (MSI) → pre-flight → what-if → deploy → post-deploy tests`. |
+| **Tier 2 — Post-deploy** | Ad-hoc | In-VNet host (jumpbox / DC) | Public CNAME, RDS CALs activation, AD `Terminal Server License Servers` membership, smoke tests, tear-down. |
 
 > [!NOTE]
-> **Deploy from inside the VNet (laptop on VPN or a jumpbox).** The artifacts
-> storage account and Key Vault are private-endpoint-only (public network access
-> disabled). The GitHub-hosted pipeline runner sits outside the VNet, so its
-> pre-deploy checks (blob reachability, Key Vault cert read, `az deployment group
-> validate`) can't reach those resources and the run fails. Until a **self-hosted
-> runner inside the VNet** is set up, run [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1)
-> from a machine with line-of-sight to the VNet. It packages DSC via
+> **Run every tier from one host inside the VNet** — a jumpbox, the DC, or a VM
+> reached via Bastion (a laptop on VPN works too if it resolves the private
+> endpoints). The artifacts storage account and Key Vault are private-endpoint-only
+> (public network access disabled), so Tier 0's cert import, Tier 1's DSC upload +
+> Key Vault read, and Tier 2's smoke tests all need line-of-sight; the host also
+> needs outbound internet for Tier 0's GitHub/Graph wiring. The GitHub-hosted
+> pipeline runner sits outside the VNet, so its pre-deploy checks (blob reachability,
+> Key Vault cert read, `az deployment group validate`) fail there. Until a
+> **self-hosted runner inside the VNet** is set up, run
+> [`scripts/Invoke-ManualDeploy.ps1`](scripts/Invoke-ManualDeploy.ps1) from that
+> in-VNet host. It packages DSC via
 > [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), runs the
 > readiness gate, then `what-if` + `create`. Full steps: [`docs/manual-deploy.md`](docs/manual-deploy.md).
 

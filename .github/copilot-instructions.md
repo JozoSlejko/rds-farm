@@ -21,11 +21,13 @@ designed (not yet built) in [docs/app-proxy.md](../docs/app-proxy.md).
 
 ## Where code runs (this matters)
 
-- **Authoring** happens on macOS (this clone). **Deploys** must run from a host
-  with **VNet line-of-sight** — the artifacts storage account and Key Vault are
-  **private-endpoint-only** (public network access disabled). A GitHub-hosted
-  runner can't reach them, so Tier 1 runs from a laptop-on-VPN or an in-VNet
-  jumpbox, not the pipeline.
+- **Authoring** happens on macOS (this clone). **All tiers (0, 1, 2) run from one
+  host inside the VNet** (a jumpbox, the DC, or a VM via Bastion) — the artifacts
+  storage account and Key Vault are **private-endpoint-only** (public network
+  access disabled), so Tier 0's cert import, Tier 1's deploy, and Tier 2's smoke
+  tests all need line-of-sight. A GitHub-hosted runner can't reach them, so the
+  pipeline can't run Tier 1 either. (The host also needs outbound internet for
+  Tier 0's GitHub/Graph wiring.)
 - **Apple Silicon cannot parse the DSC `Configuration` keyword** (an ARM64
   limitation). Never trust a local Mac parse of `dsc/*.ps1`; validate via
   `tests/Test-DscConfiguration.ps1` on Windows / CI.

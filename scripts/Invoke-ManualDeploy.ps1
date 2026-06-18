@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     Replaces the four-step recipe in docs/manual-deploy.md with a single command.
-    Mirrors what the GitHub Actions workflow does but runs on your laptop:
+    Mirrors what the GitHub Actions workflow does but runs from your in-VNet host
+    (jumpbox / DC; the private-endpoint-only KV/SA aren't reachable from a plain laptop):
 
       1. Read passwords interactively (Read-Host -AsSecureString) unless
          already present in the environment.
