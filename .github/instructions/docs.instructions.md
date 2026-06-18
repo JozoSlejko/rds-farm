@@ -19,8 +19,11 @@ description: 'Documentation style for the rds-farm docs.'
 
 A *reference* documents what exists; a *guide* must be followable by someone who
 knows **nothing beyond "I want to do this."** When a page tells the reader to **do**
-something (deploy, configure, migrate), hold it to this bar — run `/write-guide` to
-self-review against it:
+something (deploy, configure, migrate), hold it to this bar. Apply the
+[`write-guide`](../prompts/write-guide.prompt.md) checklist as you write and before
+you finish (you can also invoke it directly with `/write-guide`); for a large new
+page or a full-doc audit, delegate to the **RDS Docs** agent, which inherits this
+same bar. The checklist:
 
 - **State the audience + end state** in the opening line.
 - **Prerequisites get their own section** (a list), each saying how to obtain or
