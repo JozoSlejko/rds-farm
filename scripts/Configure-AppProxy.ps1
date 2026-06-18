@@ -13,7 +13,7 @@
       1. Instantiate the custom application template (8adf8e6e-...) -> app + SP.
       2. Set identifierUris + web redirect/home URLs.
       3. Configure onPremisesPublishing for RDS: Entra pre-auth, internal == external
-         URL (rds.slejco.com), HTTP-only cookie OFF, header/body translation OFF,
+         URL (your -Fqdn), HTTP-only cookie OFF, header/body translation OFF,
          plus the custom-domain cert from New-LetsEncryptRdsCertificate.ps1.
       4. Create/find the connector group and assign the app to it.
       5. Assign the RDS access group to the app.
@@ -23,7 +23,7 @@
     directly to the app registration here.
 
     After this script:
-      * Create the GoDaddy CNAME  rds.slejco.com -> <app>.msappproxy.net
+      * Create the CNAME  <Fqdn> -> <app>.msappproxy.net at your DNS host
         (the target is shown in the Entra portal -> the app -> Application Proxy).
       * Point RDS at the proxy (Set-RDDeploymentGatewayConfiguration + the per-
         collection pre-auth CustomRdpProperty - handled by the DSC change).
@@ -33,7 +33,12 @@
     Enterprise application display name. Default: 'RDS Farm (Entra App Proxy)'.
 
 .PARAMETER Fqdn
-    Vanity hostname; becomes both the internal and external URL host. Default: rds.slejco.com.
+    Vanity hostname; becomes both the internal and external URL host, e.g.
+    rds.example.com. Defaults to appProxyExternalFqdn read from -BicepParamFile.
+
+.PARAMETER BicepParamFile
+    Tier 0-owned main.bicepparam used to hydrate -Fqdn when you don't pass it.
+    Default: the repo-root main.bicepparam beside scripts/.
 
 .PARAMETER PfxPath
     Path to the full-chain PFX for the custom domain (from the cert script).
@@ -65,14 +70,15 @@
 [CmdletBinding()]
 param(
     [string]$DisplayName = 'RDS Farm (Entra App Proxy)',
-    [string]$Fqdn = 'rds.slejco.com',
+    [string]$Fqdn,
     [Parameter(Mandatory)][string]$PfxPath,
     [Parameter(Mandatory)][securestring]$PfxPassword,
     [string]$ConnectorGroupName = 'RDS Connectors',
     [string]$AssignGroupObjectId,
     [string]$AssignGroupName,
     [string]$ConnectorId,
-    [string]$ExistingApplicationObjectId
+    [string]$ExistingApplicationObjectId,
+    [string]$BicepParamFile = (Join-Path $PSScriptRoot '..' 'main.bicepparam')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,10 +119,56 @@ function Invoke-Graph {
     }
 }
 
+function Get-BicepParamValue {
+    # Compile a .bicepparam to ARM JSON and return a hashtable of paramName -> value,
+    # via the same 'az bicep build-params' path the repo uses to validate the file.
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Bicep param file not found: $Path"
+    }
+    # readEnvironmentVariable(...) calls in the param file must resolve to compile.
+    foreach ($v in 'DOMAIN_JOIN_PASSWORD', 'LOCAL_ADMIN_PASSWORD') {
+        if (-not [Environment]::GetEnvironmentVariable($v)) {
+            [Environment]::SetEnvironmentVariable($v, 'placeholder-for-read-only', 'Process')
+        }
+    }
+    $tmp = New-TemporaryFile
+    try {
+        & az bicep build-params --file $Path --outfile $tmp.FullName 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not compile '$Path' with 'az bicep build-params' to read its values."
+        }
+        $parsed = Get-Content -LiteralPath $tmp.FullName -Raw | ConvertFrom-Json
+        $values = @{}
+        if (($parsed.PSObject.Properties.Name -contains 'parameters') -and $parsed.parameters) {
+            foreach ($p in $parsed.parameters.PSObject.Properties) {
+                if ($p.Value -and ($p.Value.PSObject.Properties.Name -contains 'value')) {
+                    $values[$p.Name] = $p.Value.value
+                }
+            }
+        }
+        return $values
+    }
+    finally {
+        Remove-Item -LiteralPath $tmp.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Assert-Tool az
 az account show -o none
 if ($LASTEXITCODE -ne 0) { throw 'Not signed in. Run az login as a Cloud Application Administrator.' }
 if (-not (Test-Path -LiteralPath $PfxPath)) { throw "PFX not found at '$PfxPath'." }
+
+# Hydrate the external FQDN from the Tier 0-owned bicepparam unless you passed -Fqdn.
+if (-not $Fqdn -and (Test-Path -LiteralPath $BicepParamFile)) {
+    $bicep = Get-BicepParamValue -Path $BicepParamFile
+    if ($bicep.ContainsKey('appProxyExternalFqdn')) { $Fqdn = $bicep['appProxyExternalFqdn'] }
+}
+if (-not $Fqdn) {
+    throw "No -Fqdn given and 'appProxyExternalFqdn' is empty in $BicepParamFile. Pass -Fqdn rds.example.com, or run Tier 0 with -UseAppProxy -AppProxyExternalFqdn <fqdn> first."
+}
+Write-Host "External FQDN: $Fqdn" -ForegroundColor Cyan
 
 # Resolve the access group object id ------------------------------------------
 if (-not $AssignGroupObjectId -and $AssignGroupName) {
@@ -228,7 +280,7 @@ else {
 
 Write-Host ''
 Write-Host '================ NEXT STEPS ================' -ForegroundColor Cyan
-Write-Host "1. GoDaddy: CNAME $Fqdn -> <app>.msappproxy.net (target is in the portal: the app -> Application Proxy)."
+Write-Host "1. Your DNS host: CNAME $Fqdn -> <app>.msappproxy.net (target is in the portal: the app -> Application Proxy)."
 Write-Host "2. Internal split-horizon DNS: A record $Fqdn -> RD Gateway private IP."
 Write-Host '3. Apply the DSC change (GatewayExternalFqdn + pre-auth CustomRdpProperty) and redeploy.'
 Write-Host '4. Verify, then remove the public load balancer (Phase 2).'

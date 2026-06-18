@@ -118,6 +118,11 @@ The design inputs, all decided 2026-06-17:
 Three DNS planes. Only the ACME challenge record needs automation; everything else
 is static.
 
+> [!NOTE]
+> GoDaddy is this farm's registrar; the delegation works with **any** public DNS
+> host. See [Make it yours](#make-it-yours) in the deploying runbook for the full
+> substitution map.
+
 ### 1. Public — GoDaddy (`slejco.com` zone)
 
 All set by hand, once:
@@ -317,12 +322,38 @@ Have all of these ready — each bullet says how to get or confirm it:
 - **Signed in on the in-VNet host:** `az login` and `gh auth login`, as an account
   with Owner/Contributor on the subscription.
 
+### Make it yours
+
+This runbook uses the reference farm's real names so the commands are
+copy-pasteable. To deploy **your** farm, substitute the values below. The scripts
+read the FQDN and Key Vault from your Tier 0-owned `main.bicepparam` and **derive**
+the ACME zone and alias from the FQDN, so in practice you pass very little.
+
+| Placeholder | This farm (worked example) | Where yours comes from |
+| --- | --- | --- |
+| External / vanity FQDN | `rds.slejco.com` | `appProxyExternalFqdn` in `main.bicepparam` (set by the Tier 0 flip in step 6), or `-Fqdn` |
+| Public DNS host (registrar) | GoDaddy, zone `slejco.com` | wherever your domain's public DNS is hosted |
+| ACME challenge zone (Azure DNS) | `acme.slejco.com` | derived as `acme.<parent of FQDN>`; override with `-AcmeDnsZoneName` |
+| ACME challenge alias | `rds.acme.slejco.com` | derived as `<first label of FQDN>.<acme zone>`; override with `-DnsAlias` |
+| Key Vault | `rdsjslejcokv01` | `keyVaultName` in `main.bicepparam`, or `-KeyVaultName` |
+| Access group | `RDS-Users` | `-AssignGroupName` on the publish step (step 4) |
+
+> [!NOTE]
+> **Any public DNS host works — GoDaddy isn't special here.** The registrar only
+> ever holds **two static records** (the `NS` delegation and one `CNAME`); the
+> dynamic ACME `TXT` lives in the Azure DNS child zone, written by managed identity.
+> Cloudflare, Route 53, Namecheap, etc. all work identically. If your DNS provider
+> has its own [posh-acme plugin](https://poshac.me/docs/) or an unrestricted API,
+> you can skip the child-zone delegation entirely and point posh-acme straight at it.
+
 ### 1. Delegate the ACME challenge DNS zone to Azure DNS
 
 **Why:** Let's Encrypt (the certificate authority that issues the cert) proves you
 control `rds.slejco.com` by reading a DNS TXT record. GoDaddy's DNS API is locked
 down, so you host *just that one challenge record* in an Azure DNS zone the renewal
-script can write to, and point GoDaddy at it once.
+script can write to, and point GoDaddy at it once. (GoDaddy is just this farm's
+registrar — the same two static records work at any DNS host; see
+[Make it yours](#make-it-yours).)
 
 Create the zone and print the four name servers Azure assigns it:
 
@@ -374,13 +405,17 @@ spending the strict production quota. When staging succeeds, run again **without
 
 ```powershell
 # Test run against staging - validates DNS only; the cert it makes is untrusted.
-./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com -Staging
+./scripts/New-LetsEncryptRdsCertificate.ps1 -Fqdn rds.slejco.com -Contact you@slejco.com -Staging
 
 # Real run - issues the trusted cert and imports it into Key Vault.
-$cert = ./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com
+$cert = ./scripts/New-LetsEncryptRdsCertificate.ps1 -Fqdn rds.slejco.com -Contact you@slejco.com
 ```
 
-`-Contact` is the email Let's Encrypt uses for expiry notices.
+`-Contact` is the email Let's Encrypt uses for expiry notices. `-Fqdn` is your
+vanity hostname; the script derives the `acme.slejco.com` challenge zone and the
+`rds.acme.slejco.com` alias from it (override with `-AcmeDnsZoneName` / `-DnsAlias`)
+and reads the Key Vault from `main.bicepparam`. You can drop `-Fqdn` once the Tier 0
+flip in step 6 has set `appProxyExternalFqdn` — until then, pass it explicitly.
 
 **Result:** the real run imports the cert into Key Vault secret `rds-tls` and
 stages a PFX file. The returned `$cert` object holds `$cert.PfxPath` and
