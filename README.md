@@ -360,7 +360,7 @@ The README above is the deployment guide. For deeper reference on a specific are
 | [Deploy from scratch — runbook](docs/runbook.md) | **Start here.** One linear top-to-bottom walkthrough: empty subscription → working RD Web sign-in (prereqs → Tier 0 → laptop/jumpbox deploy → post-deploy). |
 | [Manual setup checklist](docs/manual-checklist.md) | You want a tickable / printable version of the [Deployment guide](#deployment-guide) above. |
 | [Prerequisite resources (Key Vault + storage)](docs/prereq-resources.md) | You want to provision the prereq Key Vault and DSC storage account automatically instead of pre-creating them by hand. |
-| [Gateway FQDN and TLS certificate](docs/fqdn-and-cert.md) | Deciding the public hostname (Azure LB vs vanity CNAME) and cert mode (Csr / ImportPfx / SelfSigned). Explains what Tier 0 does for each combination. |
+| [Gateway hostname and TLS certificate](docs/fqdn-and-cert.md) | Choosing the publishing topology (load balancer or Entra application proxy), the public hostname, and the cert mode (Csr / ImportPfx / SelfSigned / LetsEncrypt). Explains what Tier 0 does with each. |
 | [Manual deploy](docs/manual-deploy.md) | The working deploy path (laptop/jumpbox with VNet line-of-sight). What the deployment does end-to-end (12 steps), plus the underlying `az` commands for cert creation, bicepparam editing, deploy, and CNAME. |
 | [CI/CD with GitHub Actions](docs/ci-cd.md) | Wiring up the included `.github/workflows/deploy.yml` (OIDC federated creds, RBAC, env approval). |
 | [Testing & verification](docs/testing.md) | Five-stage smoke tests from pre-deploy `what-if` to end-to-end client RDP. |
