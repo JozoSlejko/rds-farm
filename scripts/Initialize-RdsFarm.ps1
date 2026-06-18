@@ -68,9 +68,9 @@
 
 .PARAMETER Location
     Azure region for the prereq RGs / KV / SA and the farm deployment.
-    No default - pass `-Location <region>` (e.g. `-Location italynorth`) or
-    set `$env:AZURE_LOCATION`. In `-Interactive` mode you'll be prompted
-    for it instead. Bound here at param-time so the value flows into the
+    **Required, no default** - pass `-Location <region>` (e.g.
+    `-Location italynorth`). Interactive mode (the default) prompts for it; a
+    `-NonInteractive` run must pass it explicitly. The value flows into the
     bicepparam, the prereqs deploy, and the CI repo variable.
 
 .PARAMETER AdDomainName
@@ -207,13 +207,12 @@
     artifacts SA + Key Vault and pass their names via -ArtifactsStorageAccount
     and -KeyVaultName.
 
-.PARAMETER Interactive
-    Switch. Also prompt for every OPTIONAL parameter (subscription, location,
-    domain-join account, OU path, RG names, cert name, app display name, the
-    three -Skip* / -RequireProductionApproval switches, etc.), pre-filling the
-    current value as the bracketed default. Press Enter to keep each default.
-    Without this switch the script only asks for the required values and
-    silently uses defaults for everything else.
+.PARAMETER NonInteractive
+    Switch. By DEFAULT the script is interactive: it prompts for every parameter
+    (required and optional), pre-filling the current value as the bracketed
+    default - press Enter to keep each. Pass -NonInteractive to skip the optional
+    prompts and only ask for missing REQUIRED values, silently using defaults for
+    the rest (CI/CD-friendly).
 
 .PARAMETER ConfigFile
     Path to the .psd1 file used to persist Step 1 answers between runs.
@@ -227,8 +226,9 @@
 
 .EXAMPLE
     # Fully scripted (CI/CD-friendly, prompts only for passwords)
-    .\scripts\Initialize-RdsFarm.ps1 `
+    .\scripts\Initialize-RdsFarm.ps1 -NonInteractive `
         -GitHubRepo 'contoso/rds-farm' `
+        -Location italynorth `
         -AdDomainName contoso.local -AdDnsServerIp 10.10.0.4 `
         -RdsAccessGroup 'RDS-Users' `
         -ExistingVnetName corp-vnet `
@@ -364,7 +364,7 @@ param(
     [switch]$SkipPrereqsDeploy,
 
     # UX
-    [switch]$Interactive,
+    [switch]$NonInteractive,
 
     # Persisted Step 1 answers
     [string]$ConfigFile = (Join-Path $PSScriptRoot '..' '.rds-farm-init.config.psd1'),
@@ -374,14 +374,15 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Hardcoded region defaults are a footgun: they silently land prereq RGs (KV,
-# SA) in the wrong region, where you then can't move them. Require explicit
-# intent. -Interactive mode prompts for it later; everyone else gets the
-# env-var fallback or a clear error before any az call.
-if (-not $Location -and $env:AZURE_LOCATION) { $Location = $env:AZURE_LOCATION }
+# Interactive prompting is the default. -NonInteractive opts out: it only asks for
+# missing REQUIRED values and silently uses defaults for the optional ones.
+$Interactive = -not $NonInteractive
+
+# -Location is required with no default (a hardcoded region silently lands the
+# prereq RGs/KV/SA in the wrong place). Interactive mode prompts for it; a
+# -NonInteractive run must pass it explicitly.
 if (-not $Location -and -not $Interactive) {
-    throw "No -Location provided and `$env:AZURE_LOCATION not set. " +
-          "Pass -Location <region> (e.g. -Location italynorth) or run with -Interactive."
+    throw "No -Location provided. Pass -Location <region> (e.g. -Location italynorth), or omit -NonInteractive to be prompted."
 }
 
 # ---------------------------------------------------------------------------
@@ -865,7 +866,7 @@ if ($Interactive) {
         Write-Host "    Switched subscription: $($ctx.name) ($SubscriptionId)" -ForegroundColor DarkGray
     }
 
-    $Location = Read-OptionalString `
+    $Location = Read-RequiredString `
         -Prompt 'Azure region' `
         -Default $Location `
         -Hint 'Region for the prereq RGs (KV + storage) and the farm RG.'
