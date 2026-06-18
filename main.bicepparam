@@ -44,9 +44,9 @@ param gatewayDnsLabelPrefix = 'rds-j-slejco'
 param deployBastion = true
 
 // Microsoft Entra application proxy (Phase 2). useAppProxy=false keeps the
-// public-LB path; Tier 0 owns these values. See docs/app-proxy.md.
+// public-LB path; Tier 0 owns this value. The external FQDN is publicGatewayFqdn
+// (shared with LB mode). See docs/app-proxy.md.
 param useAppProxy = false
-param appProxyExternalFqdn = ''
 
 // DSC artifacts
 // The VMs' user-assigned managed identity is granted Storage Blob Data Reader

@@ -34,7 +34,7 @@
 
 .PARAMETER Fqdn
     Vanity hostname; becomes both the internal and external URL host, e.g.
-    rds.example.com. Defaults to appProxyExternalFqdn read from -BicepParamFile.
+    rds.example.com. Defaults to publicGatewayFqdn read from -BicepParamFile.
 
 .PARAMETER BicepParamFile
     Tier 0-owned main.bicepparam used to hydrate -Fqdn when you don't pass it.
@@ -163,10 +163,10 @@ if (-not (Test-Path -LiteralPath $PfxPath)) { throw "PFX not found at '$PfxPath'
 # Hydrate the external FQDN from the Tier 0-owned bicepparam unless you passed -Fqdn.
 if (-not $Fqdn -and (Test-Path -LiteralPath $BicepParamFile)) {
     $bicep = Get-BicepParamValue -Path $BicepParamFile
-    if ($bicep.ContainsKey('appProxyExternalFqdn')) { $Fqdn = $bicep['appProxyExternalFqdn'] }
+    if ($bicep.ContainsKey('publicGatewayFqdn')) { $Fqdn = $bicep['publicGatewayFqdn'] }
 }
 if (-not $Fqdn) {
-    throw "No -Fqdn given and 'appProxyExternalFqdn' is empty in $BicepParamFile. Pass -Fqdn rds.example.com, or run Tier 0 with -UseAppProxy -AppProxyExternalFqdn <fqdn> first."
+    throw "No -Fqdn given and 'publicGatewayFqdn' is empty in $BicepParamFile. Pass -Fqdn rds.example.com, or run Tier 0 with -CertMode LetsEncrypt -PublicGatewayFqdn <fqdn> first."
 }
 Write-Host "External FQDN: $Fqdn" -ForegroundColor Cyan
 

@@ -143,12 +143,9 @@
     Publish through Microsoft Entra application proxy instead of a public load
     balancer. When $true the farm skips the public IP + LB and internet inbound
     NSG rules, deploys a connector VM, and configures the gateway for
-    -AppProxyExternalFqdn with Entra pre-authentication. Default $false. Written
-    to main.bicepparam (useAppProxy). See docs/app-proxy.md.
-
-.PARAMETER AppProxyExternalFqdn
-    External FQDN published by application proxy (e.g. rds.slejco.com). Required
-    when -UseAppProxy. Written to main.bicepparam (appProxyExternalFqdn).
+    -PublicGatewayFqdn with Entra pre-authentication. Default $false (implied by
+    -CertMode LetsEncrypt). Written to main.bicepparam (useAppProxy). See
+    docs/app-proxy.md.
 
 .PARAMETER ArtifactsStorageAccount
     Globally unique storage account name (3-24 chars, lowercase
@@ -253,7 +250,7 @@
     # First run creates the Azure DNS challenge zone and prints the registrar records;
     # after you delegate, re-run to issue the cert and publish the proxy app.
     .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'contoso/rds-farm' `
-        -CertMode LetsEncrypt -AppProxyExternalFqdn rds.contoso.com `
+        -CertMode LetsEncrypt -PublicGatewayFqdn rds.contoso.com `
         -AcmeContactEmail admin@contoso.com -RdsAccessGroup 'RDS-Users' `
         -AdDomainName contoso.local -AdDnsServerIp 10.10.0.4 `
         -ExistingVnetName corp-vnet -ExistingVnetResourceGroup network-rg -ExistingRdsSubnetName snet-rds `
@@ -310,11 +307,10 @@ param(
 
     # Microsoft Entra application proxy. When -UseAppProxy the farm skips the
     # public IP + load balancer and internet inbound NSG rules, deploys a
-    # connector VM, and configures the gateway for -AppProxyExternalFqdn with
-    # Entra pre-authentication. Both are written to main.bicepparam in Step 6.
-    # See docs/app-proxy.md.
+    # connector VM, and configures the gateway for -PublicGatewayFqdn (the single
+    # external FQDN used by both modes) with Entra pre-authentication. Written to
+    # main.bicepparam in Step 6. See docs/app-proxy.md.
     [bool]$UseAppProxy = $false,
-    [string]$AppProxyExternalFqdn,
 
     # Prereqs
     [string]$ArtifactsStorageAccount,
@@ -352,7 +348,7 @@ param(
     [string]$CertName = 'rds-tls',
 
     # Let's Encrypt (only when -CertMode LetsEncrypt; implies -UseAppProxy). The
-    # cert is issued for -AppProxyExternalFqdn via DNS-01, with the challenge TXT
+    # cert is issued for -PublicGatewayFqdn via DNS-01, with the challenge TXT
     # written to an Azure DNS zone delegated from your registrar.
     [string]$AcmeContactEmail,
     [string]$AcmeDnsZoneName,
@@ -664,7 +660,7 @@ $script:RdsFarmInitConfigSections = @(
     @{ Title = 'Existing network'    ; Params = @('ExistingVnetName','ExistingVnetResourceGroup','ExistingRdsSubnetName','AllowedClientSourceAddressPrefixes','SubnetNsgName') }
     @{ Title = 'Gateway hostname'    ; Params = @('PublicGatewayFqdn','GatewayDnsLabelPrefix') }
     @{ Title = 'Bastion'             ; Params = @('DeployBastion') }
-    @{ Title = 'Application proxy'   ; Params = @('UseAppProxy','AppProxyExternalFqdn') }
+    @{ Title = 'Application proxy'   ; Params = @('UseAppProxy') }
     @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
     @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName','AcmeContactEmail','AcmeDnsZoneName','AcmeDnsResourceGroup') }
     @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
@@ -1064,21 +1060,20 @@ if ($CertMode -eq 'ImportPfx' -and ($Interactive -or -not $PfxPath)) {
 # all of that here so the SelfSigned / vanity FQDN prompts below can be skipped.
 if ($CertMode -eq 'LetsEncrypt') {
     $UseAppProxy = $true
-    if ($Interactive -or -not $AppProxyExternalFqdn) {
-        $AppProxyExternalFqdn = Read-RequiredString `
-            -Prompt 'App Proxy external FQDN (e.g. rds.contoso.com)' `
-            -Default $AppProxyExternalFqdn `
+    if ($Interactive -or -not $PublicGatewayFqdn) {
+        $PublicGatewayFqdn = Read-RequiredString `
+            -Prompt 'Public gateway FQDN (e.g. rds.contoso.com)' `
+            -Default $PublicGatewayFqdn `
             -Hint @(
                 'Vanity hostname users type. Becomes the cert Subject/SAN and the App Proxy external URL.',
                 'Must be a DNS name you own; its public DNS is hosted at your registrar.'
             )
     }
-    if (-not (Test-FqdnFormat $AppProxyExternalFqdn)) {
-        throw "AppProxyExternalFqdn '$AppProxyExternalFqdn' is not a valid DNS name. Expect 'rds.contoso.com'."
+    if (-not (Test-FqdnFormat $PublicGatewayFqdn)) {
+        throw "PublicGatewayFqdn '$PublicGatewayFqdn' is not a valid DNS name. Expect 'rds.contoso.com'."
     }
-    $PublicGatewayFqdn = $AppProxyExternalFqdn
-    if (-not $GatewayDnsLabelPrefix) { $GatewayDnsLabelPrefix = Get-DefaultDnsLabel $AppProxyExternalFqdn }
-    if (-not $AcmeDnsZoneName) { $AcmeDnsZoneName = 'acme.' + ($AppProxyExternalFqdn -split '\.', 2)[1] }
+    if (-not $GatewayDnsLabelPrefix) { $GatewayDnsLabelPrefix = Get-DefaultDnsLabel $PublicGatewayFqdn }
+    if (-not $AcmeDnsZoneName) { $AcmeDnsZoneName = 'acme.' + ($PublicGatewayFqdn -split '\.', 2)[1] }
     if ($Interactive -or -not $AcmeContactEmail) {
         $AcmeContactEmail = Read-RequiredString `
             -Prompt "Let's Encrypt contact email" `
@@ -1185,7 +1180,6 @@ Write-Host "    Key Vault                    : $KeyVaultName (RG $KeyVaultResour
 Write-Host "    Farm RG (deploy target)      : $FarmResourceGroup ($Location)"
 Write-Host "    Cert mode                    : $CertMode$(if ($PfxPath) { "  (pfx=$PfxPath)" })"
 if ($CertMode -eq 'LetsEncrypt') {
-    Write-Host "    App Proxy external FQDN      : $AppProxyExternalFqdn"
     Write-Host "    ACME challenge zone (AzDNS)  : $AcmeDnsZoneName (RG $AcmeDnsResourceGroup)"
     Write-Host "    Let's Encrypt contact        : $AcmeContactEmail"
 }
@@ -1404,8 +1398,8 @@ if ($CertMode -eq 'LetsEncrypt') {
     }
     $nsServers = az network dns zone show -g $AcmeDnsResourceGroup -n $AcmeDnsZoneName --query nameServers -o tsv
     if ($LASTEXITCODE -ne 0) { throw "Failed to read name servers for '$AcmeDnsZoneName'." }
-    $fqdnLabel       = ($AppProxyExternalFqdn -split '\.', 2)[0]
-    $registrarDomain = ($AppProxyExternalFqdn -split '\.', 2)[1]
+    $fqdnLabel       = ($PublicGatewayFqdn -split '\.', 2)[0]
+    $registrarDomain = ($PublicGatewayFqdn -split '\.', 2)[1]
     $dnsAlias        = "$fqdnLabel.$AcmeDnsZoneName"
 
     Write-Host ""
@@ -1420,9 +1414,9 @@ if ($CertMode -eq 'LetsEncrypt') {
     }
 
     # 5b. Issue / renew the cert via DNS-01 using the current az login (no IMDS).
-    Write-Host "    Issuing Let's Encrypt certificate for $AppProxyExternalFqdn..." -ForegroundColor Green
+    Write-Host "    Issuing Let's Encrypt certificate for $PublicGatewayFqdn..." -ForegroundColor Green
     $cert = & $newLeCert `
-        -Fqdn            $AppProxyExternalFqdn `
+        -Fqdn            $PublicGatewayFqdn `
         -AcmeDnsZoneName $AcmeDnsZoneName `
         -KeyVaultName    $KeyVaultName `
         -CertName        $CertName `
@@ -1436,8 +1430,8 @@ if ($CertMode -eq 'LetsEncrypt') {
         -KeyVaultName             $KeyVaultName `
         -KeyVaultResourceGroup    $KeyVaultResourceGroup `
         -KeyVaultCertSecretUri    "https://$KeyVaultName.vault.azure.net/secrets/$CertName" `
-        -CertificateSubject       "CN=$AppProxyExternalFqdn" `
-        -PublicGatewayFqdn        $AppProxyExternalFqdn `
+        -CertificateSubject       "CN=$PublicGatewayFqdn" `
+        -PublicGatewayFqdn        $PublicGatewayFqdn `
         -EnableCertificateBinding $true `
         -NoBackup | Out-Host
 
@@ -1446,7 +1440,7 @@ if ($CertMode -eq 'LetsEncrypt') {
     Write-Host "==> Step 5b: Publish Entra application proxy app (Configure-AppProxy.ps1)" -ForegroundColor Green
     Write-Host "    This needs the Cloud Application Administrator role in Entra ID." -ForegroundColor DarkGray
     & $configureAppProxy `
-        -Fqdn            $AppProxyExternalFqdn `
+        -Fqdn            $PublicGatewayFqdn `
         -PfxPath         $cert.PfxPath `
         -PfxPassword     $cert.PfxPassword `
         -AssignGroupName $RdsAccessGroup `
@@ -1530,9 +1524,6 @@ $stringPatches = [ordered]@{
     # (rds.contoso.com) survives, GatewayExternalFqdn != cert subject, and RDS
     # mints a competing self-signed gateway cert.
     publicGatewayFqdn                      = $PublicGatewayFqdn
-    # App Proxy external FQDN (empty unless -UseAppProxy). Drives the gateway
-    # external FQDN + pre-auth URL in main.bicep.
-    appProxyExternalFqdn                   = $AppProxyExternalFqdn
     rdsAccessGroup                         = $RdsAccessGroup
     artifactsLocation                      = $artifactsLocationUrl
     artifactsStorageAccountName            = $ArtifactsStorageAccount

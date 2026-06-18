@@ -104,14 +104,11 @@ param certificateSubject string = ''
 @description('Opaque marker forwarded to every CSE/DSC extension as properties.forceUpdateTag. Causes the platform to re-run Bootstrap.ps1 (and therefore re-apply whatever Configuration.zip is currently in the artifacts SA) on every deploy. Defaults to utcNow() so each `az deployment group create` mutates the value; pass a stable string (e.g. a release tag) only if you explicitly want CSE to stay quiescent.')
 param dscRevision string = utcNow()
 
-@description('Public FQDN clients type into Remote Desktop / RD Web (and what the cert Subject/SAN must match). Leave empty to use the LB DNS-label hostname (`<dnsLabel>.<region>.cloudapp.azure.com`) — only viable with a self-signed cert because a public CA will refuse to issue for `cloudapp.azure.com`. For production set this to a hostname you control, e.g. `rds.contoso.com`, and create a CNAME from that hostname to the LB FQDN after the first deploy.')
+@description('Public FQDN clients type into Remote Desktop / RD Web (and what the cert Subject/SAN must match). Used in BOTH modes: the load-balancer vanity hostname, or - when useAppProxy = true - the Entra application proxy external FQDN and pre-auth URL. Leave empty (LB mode only) to use the LB DNS-label hostname (`<dnsLabel>.<region>.cloudapp.azure.com`) - only viable with a self-signed cert because a public CA will refuse to issue for `cloudapp.azure.com`. For production set this to a hostname you control, e.g. `rds.contoso.com`.')
 param publicGatewayFqdn string = ''
 
-@description('Publish through Microsoft Entra application proxy instead of a public load balancer. When true the template skips the public IP + load balancer, omits the internet-facing inbound NSG rules, deploys an application proxy connector VM, and configures the gateway for the App Proxy external FQDN with Entra pre-authentication.')
+@description('Publish through Microsoft Entra application proxy instead of a public load balancer. When true the template skips the public IP + load balancer, omits the internet-facing inbound NSG rules, deploys an application proxy connector VM, and configures the gateway for publicGatewayFqdn with Entra pre-authentication.')
 param useAppProxy bool = false
-
-@description('External FQDN published by Entra application proxy (the gateway external FQDN and pre-auth URL when useAppProxy = true), e.g. rds.slejco.com. Required when useAppProxy = true.')
-param appProxyExternalFqdn string = ''
 
 var namePrefix = 'rds'
 var tags = {
@@ -178,7 +175,7 @@ var identityClientIdForVms = identity.outputs.identityClientId
 // Public hostname users type and the cert validates against. With application
 // proxy it's the external FQDN; otherwise the vanity FQDN or the LB hostname.
 var effectiveGatewayFqdn = useAppProxy
-  ? appProxyExternalFqdn
+  ? publicGatewayFqdn
   : (empty(publicGatewayFqdn) ? loadbalancer!.outputs.gatewayFqdn : publicGatewayFqdn)
 
 module gatewayVm 'modules/vm.bicep' = {
@@ -350,7 +347,7 @@ module brokerDsc 'modules/dsc.bicep' = {
       KeyVaultCertSecretUri: keyVaultCertSecretUri
       IdentityClientId: identityClientIdForVms
       // Activates the gated Rds07 pre-auth step only in App Proxy mode.
-      PreAuthServerUrl: useAppProxy ? 'https://${appProxyExternalFqdn}/' : ''
+      PreAuthServerUrl: useAppProxy ? 'https://${publicGatewayFqdn}/' : ''
     }
     protectedItems: {
       AdminCreds: {

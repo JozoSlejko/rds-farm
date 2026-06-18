@@ -33,7 +33,7 @@
 
 .PARAMETER Fqdn
     Public vanity hostname the cert is for, e.g. rds.example.com. Defaults to
-    appProxyExternalFqdn read from -BicepParamFile (main.bicepparam).
+    publicGatewayFqdn read from -BicepParamFile (main.bicepparam).
 
 .PARAMETER AcmeDnsZoneName
     Azure DNS public zone that holds the ACME challenge TXT, delegated from your
@@ -96,7 +96,7 @@
 .EXAMPLE
     ./New-LetsEncryptRdsCertificate.ps1 -Contact admin@slejco.com
     Production run with -Fqdn / -KeyVaultName hydrated from main.bicepparam (after
-    the Tier 0 App Proxy flip has set appProxyExternalFqdn).
+    the Tier 0 App Proxy flip has set publicGatewayFqdn).
 #>
 [CmdletBinding()]
 param(
@@ -176,11 +176,11 @@ Assert-Tool az
 if ((-not $Fqdn -or -not $KeyVaultName) -and (Test-Path -LiteralPath $BicepParamFile)) {
     Write-Host "Reading defaults from $BicepParamFile..." -ForegroundColor DarkGray
     $bicep = Get-BicepParamValue -Path $BicepParamFile
-    if (-not $Fqdn -and $bicep.ContainsKey('appProxyExternalFqdn')) { $Fqdn = $bicep['appProxyExternalFqdn'] }
+    if (-not $Fqdn -and $bicep.ContainsKey('publicGatewayFqdn')) { $Fqdn = $bicep['publicGatewayFqdn'] }
     if (-not $KeyVaultName -and $bicep.ContainsKey('keyVaultName')) { $KeyVaultName = $bicep['keyVaultName'] }
 }
 if (-not $Fqdn) {
-    throw "No -Fqdn given and 'appProxyExternalFqdn' is empty in $BicepParamFile. Pass -Fqdn rds.example.com, or run Tier 0 with -UseAppProxy -AppProxyExternalFqdn <fqdn> first."
+    throw "No -Fqdn given and 'publicGatewayFqdn' is empty in $BicepParamFile. Pass -Fqdn rds.example.com, or run Tier 0 with -CertMode LetsEncrypt -PublicGatewayFqdn <fqdn> first."
 }
 if (-not $KeyVaultName) {
     throw "No -KeyVaultName given and 'keyVaultName' is empty in $BicepParamFile. Pass -KeyVaultName <vault>."
