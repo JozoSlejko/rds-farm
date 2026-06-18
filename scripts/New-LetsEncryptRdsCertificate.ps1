@@ -69,6 +69,11 @@
     Authenticate the Azure DNS plugin with a service principal instead of the
     host's managed identity. Requires -ServicePrincipalCredential and -TenantId.
 
+.PARAMETER UseAzAccessToken
+    Authenticate the Azure DNS plugin with an access token from the current
+    `az login` context instead of a managed identity. Use this when issuing from
+    a host with no managed identity (e.g. a laptop running Tier 0).
+
 .PARAMETER ServicePrincipalCredential
     PSCredential for the service principal: AppId as username, client secret as
     password. Used only with -UseServicePrincipal.
@@ -104,6 +109,7 @@ param(
     [string]$SubscriptionId,
     [switch]$Staging,
     [switch]$UseServicePrincipal,
+    [switch]$UseAzAccessToken,
     [pscredential]$ServicePrincipalCredential,
     [string]$TenantId,
     [string]$PfxOutDir = (Join-Path ([IO.Path]::GetTempPath()) 'rds-appproxy'),
@@ -227,6 +233,20 @@ if ($UseServicePrincipal) {
         AZSubscriptionId = $SubscriptionId
         AZTenantId       = $TenantId
         AZAppCred        = $ServicePrincipalCredential
+    }
+}
+elseif ($UseAzAccessToken) {
+    # Use the current 'az login' context (no IMDS): fetch an ARM access token and
+    # hand it to the posh-acme Azure plugin. Lets Tier 0 issue from a laptop that
+    # has no managed identity. The signed-in account needs DNS TXT write rights
+    # on the challenge zone's resource group.
+    $azToken = az account get-access-token --query accessToken -o tsv
+    if ($LASTEXITCODE -ne 0 -or -not $azToken) {
+        throw 'Could not get an Azure access token from az. Run az login first.'
+    }
+    $pluginArgs = @{
+        AZSubscriptionId = $SubscriptionId
+        AZAccessToken    = $azToken
     }
 }
 else {

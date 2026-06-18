@@ -346,6 +346,48 @@ the ACME zone and alias from the FQDN, so in practice you pass very little.
 > has its own [posh-acme plugin](https://poshac.me/docs/) or an unrestricted API,
 > you can skip the child-zone delegation entirely and point posh-acme straight at it.
 
+### Fast path — let Tier 0 do steps 1–4
+
+If you bootstrap with **`-CertMode LetsEncrypt`**, Tier 0
+([`Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)) automates the Azure
+side of this runbook: it creates the Azure DNS challenge zone, **prints the exact
+NS + CNAME to add at your registrar**, issues the Let's Encrypt cert into Key Vault,
+and publishes the App Proxy app — all using your current `az login` (no managed
+identity needed). `-CertMode LetsEncrypt` implies `-UseAppProxy`.
+
+```powershell
+# Run 1 - creates acme.<domain> in Azure DNS and prints the registrar records, then halts.
+./scripts/Initialize-RdsFarm.ps1 -GitHubRepo me/rds-farm `
+    -CertMode LetsEncrypt -AppProxyExternalFqdn rds.slejco.com `
+    -AcmeContactEmail you@slejco.com -RdsAccessGroup 'RDS-Users'
+    # ...plus your usual Tier 0 args (VNet, AD, storage, Key Vault, ...)
+
+# ...add the printed NS + CNAME at your DNS host, wait for propagation...
+
+# Run 2 - issues the cert, imports it to Key Vault, and publishes the App Proxy app.
+./scripts/Initialize-RdsFarm.ps1 -GitHubRepo me/rds-farm `
+    -CertMode LetsEncrypt -AppProxyExternalFqdn rds.slejco.com `
+    -AcmeContactEmail you@slejco.com -RdsAccessGroup 'RDS-Users'
+```
+
+> [!NOTE]
+> Publishing the app needs the **Cloud Application Administrator** role, and Tier 0
+> must run from a host with **VNet line-of-sight** (Key Vault is private-endpoint-only).
+
+That covers steps 1–4 below. What stays manual — and why it can't be a bootstrap step:
+
+| Still by hand | Step | Why |
+| --- | --- | --- |
+| NS + CNAME at your registrar | 1 | No registrar API — Tier 0 prints the exact records |
+| Public `CNAME` → `…msappproxy.net` | 5 | Registrar-side; target only known after publish |
+| Internal split-horizon `A` record | 5 | Needs the gateway **private IP** — a Tier 1 output |
+| Flip + deploy the farm | 6 | The deploy is Tier 1 (`Invoke-ManualDeploy.ps1`) |
+| Install + register the connector | 7 | Interactive Entra sign-in, on the VM Tier 1 creates |
+| Remove the public ingress | 8 | Deliberate, verify-first, post-deploy |
+
+The numbered steps below are the **by-hand walkthrough** of the same flow — use them
+if you don't run Tier 0, or to see what it does under the hood.
+
 ### 1. Delegate the ACME challenge DNS zone to Azure DNS
 
 **Why:** Let's Encrypt (the certificate authority that issues the cert) proves you

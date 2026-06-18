@@ -16,9 +16,13 @@
          app + federated credentials + RBAC + GitHub secrets/environments.
       4. Deploys prereqs/tier0.bicep to provision the artifacts storage
          account and the Key Vault, with adminPrincipals = [you, the CI SP].
-      5. Runs scripts/New-RdsCertificate.ps1 to create / import the TLS cert
-         in the new Key Vault and patch the cert-related params in
-         main.bicepparam.
+      5. Issues / imports the TLS cert into the new Key Vault and patches the
+         cert-related params in main.bicepparam. For -CertMode Csr/ImportPfx/
+         SelfSigned this runs scripts/New-RdsCertificate.ps1; for -CertMode
+         LetsEncrypt it creates the Azure DNS challenge zone, prints the records
+         to add at your registrar, issues a Let's Encrypt DV cert via DNS-01
+         (scripts/New-LetsEncryptRdsCertificate.ps1), and publishes the Entra
+         application proxy app (scripts/Configure-AppProxy.ps1).
       6. Patches the remaining values in main.bicepparam (VNet, AD, gateway
          FQDN, allowed CIDRs, artifactsLocation, ...).
       7. Sets the ARTIFACTS_STORAGE_ACCOUNT repo variable to the SA the
@@ -44,6 +48,10 @@
       * Creating the public CNAME after the first deploy (Tier 2 —
          scripts/Set-GatewayCname.ps1 helps if you use Azure DNS).
       * Activating RDS CALs on the broker (Tier 2 — manual MMC step).
+      * (App Proxy / -CertMode LetsEncrypt) Adding the NS + CNAME records this
+         script prints at your registrar, the public CNAME to <app>.msappproxy.net,
+         the internal split-horizon A record (gateway private IP), and registering
+         the connector software (interactive Entra sign-in). See docs/app-proxy.md.
 
 .PARAMETER GitHubRepo
     <org-or-user>/<repo>, e.g. 'contoso/rds-farm'. If omitted, taken from the
@@ -151,13 +159,28 @@
     Resource group for the Key Vault. Default: 'rds-security-rg'.
 
 .PARAMETER CertMode
-    'Csr', 'ImportPfx', or 'SelfSigned'. Required.
+    'Csr', 'ImportPfx', 'SelfSigned', or 'LetsEncrypt'. Required. 'LetsEncrypt'
+    issues a publicly-trusted DV cert via DNS-01 for the App Proxy FQDN and
+    implies -UseAppProxy (see docs/app-proxy.md).
 
 .PARAMETER PfxPath
     Path to the .pfx file. Required only when -CertMode ImportPfx.
 
 .PARAMETER CertName
     Name of the cert object in Key Vault. Default: 'rds-tls'.
+
+.PARAMETER AcmeContactEmail
+    Email for the Let's Encrypt account (expiry notices). Required when
+    -CertMode LetsEncrypt.
+
+.PARAMETER AcmeDnsZoneName
+    Azure DNS public zone that holds the ACME challenge TXT, delegated from your
+    registrar. Only for -CertMode LetsEncrypt. Defaults to 'acme.<parent of the
+    App Proxy FQDN>' (e.g. acme.contoso.com for rds.contoso.com).
+
+.PARAMETER AcmeDnsResourceGroup
+    Resource group that holds the Azure DNS challenge zone (created if missing).
+    Only for -CertMode LetsEncrypt. Default: 'rds-dns-rg'.
 
 .PARAMETER AppDisplayName
     Display name for the Entra app the pipeline uses. Default:
@@ -218,6 +241,18 @@
 .EXAMPLE
     # Interactive lab setup — script prompts for every missing required value.
     .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'me/rds-farm-lab' -CertMode SelfSigned
+
+.EXAMPLE
+    # App Proxy + free Let's Encrypt cert. -CertMode LetsEncrypt implies -UseAppProxy.
+    # First run creates the Azure DNS challenge zone and prints the registrar records;
+    # after you delegate, re-run to issue the cert and publish the proxy app.
+    .\scripts\Initialize-RdsFarm.ps1 -GitHubRepo 'contoso/rds-farm' `
+        -CertMode LetsEncrypt -AppProxyExternalFqdn rds.contoso.com `
+        -AcmeContactEmail admin@contoso.com -RdsAccessGroup 'RDS-Users' `
+        -AdDomainName contoso.local -AdDnsServerIp 10.10.0.4 `
+        -ExistingVnetName corp-vnet -ExistingVnetResourceGroup network-rg -ExistingRdsSubnetName snet-rds `
+        -AllowedClientSourceAddressPrefixes '203.0.113.0/24' `
+        -ArtifactsStorageAccount contosordsart01 -KeyVaultName contoso-rds-kv01
 
 .EXAMPLE
     # Guided tour — also prompts for every optional value (defaults pre-filled).
@@ -305,10 +340,17 @@ param(
     [string[]]$ExistingKvZoneAdditionalVnetLinks,
 
     # TLS cert
-    [ValidateSet('Csr','ImportPfx','SelfSigned')]
+    [ValidateSet('Csr','ImportPfx','SelfSigned','LetsEncrypt')]
     [string]$CertMode,
     [string]$PfxPath,
     [string]$CertName = 'rds-tls',
+
+    # Let's Encrypt (only when -CertMode LetsEncrypt; implies -UseAppProxy). The
+    # cert is issued for -AppProxyExternalFqdn via DNS-01, with the challenge TXT
+    # written to an Azure DNS zone delegated from your registrar.
+    [string]$AcmeContactEmail,
+    [string]$AcmeDnsZoneName,
+    [string]$AcmeDnsResourceGroup = 'rds-dns-rg',
 
     # CI bootstrap
     [string]$AppDisplayName = 'gh-rds-farm-deploy',
@@ -586,7 +628,7 @@ $script:RdsFarmInitConfigSections = @(
     @{ Title = 'Bastion'             ; Params = @('DeployBastion') }
     @{ Title = 'Application proxy'   ; Params = @('UseAppProxy','AppProxyExternalFqdn') }
     @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
-    @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName') }
+    @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName','AcmeContactEmail','AcmeDnsZoneName','AcmeDnsResourceGroup') }
     @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
     @{ Title = 'File + skip toggles' ; Params = @('BicepParamFile','SkipCiBootstrap','SkipPrereqsDeploy') }
 )
@@ -961,14 +1003,15 @@ if ($Interactive) {
 if ($Interactive -or -not $CertMode) {
     $modeDefault = if ($CertMode) { $CertMode } else { 'SelfSigned' }
     $modeRaw = Read-RequiredString `
-        -Prompt 'Cert mode (Csr / ImportPfx / SelfSigned)' `
+        -Prompt 'Cert mode (Csr / ImportPfx / SelfSigned / LetsEncrypt)' `
         -Default $modeDefault `
         -Hint @(
             'Csr        = production. Script emits a CSR; you submit to your CA; re-run to merge the signed cert.',
             'ImportPfx  = production. You supply an existing .pfx already issued by a publicly-trusted CA.',
-            'SelfSigned = lab/dev only. Script generates the cert in Key Vault. Clients will see a trust warning.'
+            'SelfSigned = lab/dev only. Script generates the cert in Key Vault. Clients will see a trust warning.',
+            'LetsEncrypt= App Proxy. Free DV cert via DNS-01 for your App Proxy FQDN; implies -UseAppProxy.'
         )
-    if ($modeRaw -notin @('Csr','ImportPfx','SelfSigned')) { throw "Invalid -CertMode '$modeRaw'." }
+    if ($modeRaw -notin @('Csr','ImportPfx','SelfSigned','LetsEncrypt')) { throw "Invalid -CertMode '$modeRaw'." }
     $CertMode = $modeRaw
 }
 if ($CertMode -eq 'ImportPfx' -and ($Interactive -or -not $PfxPath)) {
@@ -978,7 +1021,38 @@ if ($CertMode -eq 'ImportPfx' -and ($Interactive -or -not $PfxPath)) {
         -Hint 'Full path to the existing .pfx. The cert password is prompted separately as a SecureString.'
 }
 
-if ($CertMode -eq 'SelfSigned' -and ($Interactive -or -not $PublicGatewayFqdn)) {
+# LetsEncrypt is the App Proxy path: the cert FQDN is the App Proxy external FQDN,
+# there is no public LB, and the challenge zone/alias derive from the FQDN. Resolve
+# all of that here so the SelfSigned / vanity FQDN prompts below can be skipped.
+if ($CertMode -eq 'LetsEncrypt') {
+    $UseAppProxy = $true
+    if ($Interactive -or -not $AppProxyExternalFqdn) {
+        $AppProxyExternalFqdn = Read-RequiredString `
+            -Prompt 'App Proxy external FQDN (e.g. rds.contoso.com)' `
+            -Default $AppProxyExternalFqdn `
+            -Hint @(
+                'Vanity hostname users type. Becomes the cert Subject/SAN and the App Proxy external URL.',
+                'Must be a DNS name you own; its public DNS is hosted at your registrar.'
+            )
+    }
+    if (-not (Test-FqdnFormat $AppProxyExternalFqdn)) {
+        throw "AppProxyExternalFqdn '$AppProxyExternalFqdn' is not a valid DNS name. Expect 'rds.contoso.com'."
+    }
+    $PublicGatewayFqdn = $AppProxyExternalFqdn
+    if (-not $GatewayDnsLabelPrefix) { $GatewayDnsLabelPrefix = Get-DefaultDnsLabel $AppProxyExternalFqdn }
+    if (-not $AcmeDnsZoneName) { $AcmeDnsZoneName = 'acme.' + ($AppProxyExternalFqdn -split '\.', 2)[1] }
+    if ($Interactive -or -not $AcmeContactEmail) {
+        $AcmeContactEmail = Read-RequiredString `
+            -Prompt "Let's Encrypt contact email" `
+            -Default $AcmeContactEmail `
+            -Hint 'Let''s Encrypt sends certificate-expiry notices here.'
+    }
+}
+
+if ($CertMode -eq 'LetsEncrypt') {
+    # FQDN already resolved above (= App Proxy external FQDN); nothing more to prompt.
+}
+elseif ($CertMode -eq 'SelfSigned' -and ($Interactive -or -not $PublicGatewayFqdn)) {
     # Lab path: derive the FQDN from the Azure-managed LB hostname. The DNS
     # label has to come first because there's no vanity FQDN to default it
     # from. Pre-fill from the GitHub repo name as a hint, or from a previously
@@ -1072,6 +1146,11 @@ Write-Host "    Artifacts SA                 : $ArtifactsStorageAccount (RG $Art
 Write-Host "    Key Vault                    : $KeyVaultName (RG $KeyVaultResourceGroup)"
 Write-Host "    Farm RG (deploy target)      : $FarmResourceGroup ($Location)"
 Write-Host "    Cert mode                    : $CertMode$(if ($PfxPath) { "  (pfx=$PfxPath)" })"
+if ($CertMode -eq 'LetsEncrypt') {
+    Write-Host "    App Proxy external FQDN      : $AppProxyExternalFqdn"
+    Write-Host "    ACME challenge zone (AzDNS)  : $AcmeDnsZoneName (RG $AcmeDnsResourceGroup)"
+    Write-Host "    Let's Encrypt contact        : $AcmeContactEmail"
+}
 Write-Host "    Entra app display name       : $AppDisplayName"
 Write-Host "    Production approval required : $([bool]$RequireProductionApproval)"
 Write-Host "    Skip CI bootstrap            : $([bool]$SkipCiBootstrap)"
@@ -1261,38 +1340,107 @@ if (-not $SkipPrereqsDeploy) {
 # 5. Create / import TLS cert + patch cert-related bicepparam values
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "==> Step 5: TLS certificate (New-RdsCertificate.ps1)" -ForegroundColor Green
+Write-Host "==> Step 5: TLS certificate ($CertMode)" -ForegroundColor Green
 
-$certArgs = @{
-    VaultName        = $KeyVaultName
-    CertName         = $CertName
-    Fqdn             = $PublicGatewayFqdn
-    Mode             = $CertMode
-    OutputBicepParam = $BicepParamFile
-}
-if ($CertMode -eq 'ImportPfx') { $certArgs['PfxPath'] = $PfxPath }
-
-& $newCert @certArgs
-if ($LASTEXITCODE -ne 0) {
-    if ($CertMode -eq 'Csr') {
-        Write-Host ""
-        Write-Host "    Csr mode: a .csr file was written. Submit it to your CA, then re-run:" -ForegroundColor Yellow
-        Write-Host "      ./scripts/New-RdsCertificate.ps1 -VaultName $KeyVaultName -CertName $CertName -Fqdn $PublicGatewayFqdn -MergeSignedCert <signed.cer> -OutputBicepParam $BicepParamFile" -ForegroundColor Yellow
-        Write-Host "    Re-running Initialize-RdsFarm.ps1 after the merge will patch the bicepparam." -ForegroundColor Yellow
-        throw "Cert is pending CA signature. Halting before main.bicepparam is overwritten with incomplete cert URI."
-    }
-    throw "New-RdsCertificate.ps1 failed (exit $LASTEXITCODE)."
-}
-
-# Also ensure the keyVaultResourceGroup is set in bicepparam — New-RdsCertificate
-# only updates it when it sees the param; we KNOW the RG so set it explicitly.
 $setCertUri = Join-Path $PSScriptRoot 'Set-BicepParamCertUri.ps1'
-& $setCertUri `
-    -ParamFile             $BicepParamFile `
-    -KeyVaultResourceGroup $KeyVaultResourceGroup `
-    -EnableCertificateBinding $true `
-    -NoBackup | Out-Host
-if ($LASTEXITCODE -ne 0) { throw "Failed to patch keyVaultResourceGroup in $BicepParamFile." }
+
+if ($CertMode -eq 'LetsEncrypt') {
+    # ===== App Proxy: Let's Encrypt DNS-01 cert + publish the proxy app =====
+    $newLeCert         = Join-Path $PSScriptRoot 'New-LetsEncryptRdsCertificate.ps1'
+    $configureAppProxy = Join-Path $PSScriptRoot 'Configure-AppProxy.ps1'
+
+    # 5a. Ensure the Azure DNS challenge zone exists (delegated from your registrar).
+    Write-Host "    Ensuring Azure DNS challenge zone '$AcmeDnsZoneName' (RG $AcmeDnsResourceGroup)..."
+    az group create -n $AcmeDnsResourceGroup -l $Location -o none
+    if ($LASTEXITCODE -ne 0) { throw "Failed to ensure resource group '$AcmeDnsResourceGroup'." }
+    az network dns zone show -g $AcmeDnsResourceGroup -n $AcmeDnsZoneName -o none 2>$null
+    $zoneExisted = ($LASTEXITCODE -eq 0)
+    if (-not $zoneExisted) {
+        az network dns zone create -g $AcmeDnsResourceGroup -n $AcmeDnsZoneName -o none
+        if ($LASTEXITCODE -ne 0) { throw "Failed to create Azure DNS zone '$AcmeDnsZoneName'." }
+    }
+    $nsServers = az network dns zone show -g $AcmeDnsResourceGroup -n $AcmeDnsZoneName --query nameServers -o tsv
+    if ($LASTEXITCODE -ne 0) { throw "Failed to read name servers for '$AcmeDnsZoneName'." }
+    $fqdnLabel       = ($AppProxyExternalFqdn -split '\.', 2)[0]
+    $registrarDomain = ($AppProxyExternalFqdn -split '\.', 2)[1]
+    $dnsAlias        = "$fqdnLabel.$AcmeDnsZoneName"
+
+    Write-Host ""
+    Write-Host "    One-time records to publish at your DNS host for '$registrarDomain':" -ForegroundColor Yellow
+    Write-Host "      Host: acme                        Type: NS     Value: (each name server below)" -ForegroundColor Yellow
+    foreach ($ns in @($nsServers)) { if ($ns) { Write-Host "                                                   $ns" -ForegroundColor Yellow } }
+    Write-Host "      Host: _acme-challenge.$fqdnLabel   Type: CNAME  Value: $dnsAlias" -ForegroundColor Yellow
+    Write-Host ""
+
+    if (-not $zoneExisted) {
+        throw "Created the Azure DNS challenge zone '$AcmeDnsZoneName'. Add the NS + CNAME records above at your DNS host, wait for propagation, then re-run Initialize-RdsFarm.ps1 to issue the certificate and publish the app."
+    }
+
+    # 5b. Issue / renew the cert via DNS-01 using the current az login (no IMDS).
+    Write-Host "    Issuing Let's Encrypt certificate for $AppProxyExternalFqdn..." -ForegroundColor Green
+    $cert = & $newLeCert `
+        -Fqdn            $AppProxyExternalFqdn `
+        -AcmeDnsZoneName $AcmeDnsZoneName `
+        -KeyVaultName    $KeyVaultName `
+        -CertName        $CertName `
+        -Contact         $AcmeContactEmail `
+        -UseAzAccessToken
+    if (-not $cert) { throw "New-LetsEncryptRdsCertificate.ps1 did not return a certificate (issuance failed)." }
+
+    # 5c. Patch the cert-related bicepparam values (the LE script does not do this).
+    & $setCertUri `
+        -ParamFile                $BicepParamFile `
+        -KeyVaultName             $KeyVaultName `
+        -KeyVaultResourceGroup    $KeyVaultResourceGroup `
+        -KeyVaultCertSecretUri    "https://$KeyVaultName.vault.azure.net/secrets/$CertName" `
+        -CertificateSubject       "CN=$AppProxyExternalFqdn" `
+        -PublicGatewayFqdn        $AppProxyExternalFqdn `
+        -EnableCertificateBinding $true `
+        -NoBackup | Out-Host
+
+    # 5d. Publish the Entra application proxy app (needs Cloud Application Administrator).
+    Write-Host ""
+    Write-Host "==> Step 5b: Publish Entra application proxy app (Configure-AppProxy.ps1)" -ForegroundColor Green
+    Write-Host "    This needs the Cloud Application Administrator role in Entra ID." -ForegroundColor DarkGray
+    & $configureAppProxy `
+        -Fqdn            $AppProxyExternalFqdn `
+        -PfxPath         $cert.PfxPath `
+        -PfxPassword     $cert.PfxPassword `
+        -AssignGroupName $RdsAccessGroup `
+        -BicepParamFile  $BicepParamFile | Out-Host
+}
+else {
+    # ===== Csr / ImportPfx / SelfSigned via New-RdsCertificate.ps1 =====
+    $certArgs = @{
+        VaultName        = $KeyVaultName
+        CertName         = $CertName
+        Fqdn             = $PublicGatewayFqdn
+        Mode             = $CertMode
+        OutputBicepParam = $BicepParamFile
+    }
+    if ($CertMode -eq 'ImportPfx') { $certArgs['PfxPath'] = $PfxPath }
+
+    & $newCert @certArgs
+    if ($LASTEXITCODE -ne 0) {
+        if ($CertMode -eq 'Csr') {
+            Write-Host ""
+            Write-Host "    Csr mode: a .csr file was written. Submit it to your CA, then re-run:" -ForegroundColor Yellow
+            Write-Host "      ./scripts/New-RdsCertificate.ps1 -VaultName $KeyVaultName -CertName $CertName -Fqdn $PublicGatewayFqdn -MergeSignedCert <signed.cer> -OutputBicepParam $BicepParamFile" -ForegroundColor Yellow
+            Write-Host "    Re-running Initialize-RdsFarm.ps1 after the merge will patch the bicepparam." -ForegroundColor Yellow
+            throw "Cert is pending CA signature. Halting before main.bicepparam is overwritten with incomplete cert URI."
+        }
+        throw "New-RdsCertificate.ps1 failed (exit $LASTEXITCODE)."
+    }
+
+    # Also ensure the keyVaultResourceGroup is set in bicepparam — New-RdsCertificate
+    # only updates it when it sees the param; we KNOW the RG so set it explicitly.
+    & $setCertUri `
+        -ParamFile             $BicepParamFile `
+        -KeyVaultResourceGroup $KeyVaultResourceGroup `
+        -EnableCertificateBinding $true `
+        -NoBackup | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to patch keyVaultResourceGroup in $BicepParamFile." }
+}
 
 # ---------------------------------------------------------------------------
 # 6. Patch the remaining (non-cert) values in main.bicepparam
