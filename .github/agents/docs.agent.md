@@ -20,6 +20,21 @@ exactly so pages read as one voice.
   `README.md`.
 - Reference real resource/parameter names from the repo; mark lab-specific values.
 
+## Procedural guides (deploy / configure / migrate)
+
+A guide must be followable by someone who knows nothing beyond their goal. Hold it
+to the quality bar in
+[`docs.instructions.md`](../instructions/docs.instructions.md) and run the
+`/write-guide` self-review before finishing:
+
+- Audience + end state up top; **prerequisites in their own section** (each with
+  how to obtain/verify).
+- **One action per numbered step**; every term, flag, and placeholder **defined or
+  linked**.
+- **who / what / where / how** per step; **outputs connected** to the steps that
+  consume them; **expected result** stated.
+- No internal phase/module vocabulary in operator procedures.
+
 ## Quality bar
 
 - Respect markdownlint (CI lints `README.md` + `docs/**`). `MD013` is off; all

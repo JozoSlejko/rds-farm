@@ -15,6 +15,28 @@ description: 'Documentation style for the rds-farm docs.'
 - When you add a new `docs/` page, link it from the **documentation index table**
   in `README.md`.
 
+## Writing a procedural guide (not just reference)
+
+A *reference* documents what exists; a *guide* must be followable by someone who
+knows **nothing beyond "I want to do this."** When a page tells the reader to **do**
+something (deploy, configure, migrate), hold it to this bar — run `/write-guide` to
+self-review against it:
+
+- **State the audience + end state** in the opening line.
+- **Prerequisites get their own section** (a list), each saying how to obtain or
+  verify it — never buried in a callout or mixed into step 1.
+- **One action per numbered step** — split "configure" from "deploy".
+- **Define every term on first use** ("staging", "connector group",
+  "split-horizon") or link a definition. No bare jargon.
+- **who / what / where / how per step** — the exact tool, portal blade, file, or
+  identity, not just the goal.
+- **Connect outputs to consumers** — when a step produces a value, name the later
+  step that uses it ("note the `<app>.msappproxy.net` value — you paste it in step 5").
+- **Explain every placeholder and flag** in a command (`<sa>`, `-UseAppProxy`), or
+  link where it's documented.
+- **State the expected result / how to verify** each step worked.
+- **No internal/dev vocabulary** ("Phase 1", bicep module names) in operator procedures.
+
 ## markdownlint
 
 CI runs markdownlint over `README.md` + `docs/**`. `MD013` (line length) is
