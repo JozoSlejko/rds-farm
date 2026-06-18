@@ -130,7 +130,7 @@ These five items exist before you ever touch this repo. They live in AD, network
 | **Allowed client source CIDRs** | You | Office / VPN egress IPs that may reach `TCP 443` + `UDP 3391`. **Never `0.0.0.0/0`.** |
 | **Gateway hostname + cert plan** | You | Vanity CNAME like `rds.contoso.com` (production — requires a public-CA cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). Decision rationale + what Tier 0 does for each: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md). |
 
-You also need on your **laptop** for Tier 0: PowerShell 7+, `az` CLI signed in (`az login`), `gh` CLI signed in (`gh auth login --scopes repo`), Owner on the target subscription, and Application Developer in the Entra tenant.
+On the **in-VNet host** you run Tier 0 from you'll also need: PowerShell 7+, `az` CLI signed in (`az login`), `gh` CLI signed in (`gh auth login --scopes repo`), Owner on the target subscription, and Application Developer in the Entra tenant. (The host needs outbound internet for the `az` / `gh` wiring and line-of-sight to the private Key Vault for the cert step.)
 
 ### Tier 0 — Bootstrap (one command)
 
@@ -164,7 +164,7 @@ Required values are marked **yes**. Anything else has a sensible default — omi
 | --- | --- | --- | --- |
 | `-GitHubRepo` | **yes** | — | `<owner>/<repo>`. Used for OIDC federated credentials and `gh` secret targeting. |
 | `-SubscriptionId` | no | `az account show` | Azure subscription to deploy into. |
-| `-Location` | no | `westeurope` | Region for the prereq RGs / KV / SA and the farm. |
+| `-Location` | **yes** | — | Region for the prereq RGs / KV / SA and the farm (e.g. `italynorth`). No default — pass it explicitly. |
 | `-AdDomainName` | **yes** | — | AD FQDN, e.g. `contoso.local`. |
 | `-AdDnsServerIp` | **yes** | — | IP of a DC the new VMs can reach for DNS. |
 | `-DomainJoinUserName` | no | `svc-domainjoin` | sAMAccountName of the pre-created domain-join service account. |
@@ -242,7 +242,7 @@ The values below are baked into [`main.bicepparam`](main.bicepparam) during Tier
 | `publicGatewayFqdn` | only if cert binding (recommended) | file | Public hostname clients type. Wired into RD Gateway's `GatewayExternalFqdn` and the `rdWebUrl` output. Leave empty to use the LB FQDN (lab / dev only — see [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md)). |
 | `certificateSubject` | only if cert binding | file | Subject substring to locate the cert (e.g. `CN=rds.contoso.com`). |
 
-### Tier 1 — Deploy (laptop / jumpbox)
+### Tier 1 — Deploy (in-VNet host)
 
 After Tier 0 finishes, commit `main.bicepparam` so the config is version-controlled:
 
@@ -268,21 +268,16 @@ Typical wall-clock time on `Standard_D4s_v5`: **25–40 min** (VM provisioning +
 > [!NOTE]
 > **Why not the GitHub Actions pipeline?** The artifacts storage account and Key Vault are private-endpoint-only (public network access disabled). A GitHub-hosted runner sits outside the VNet, so the pipeline's pre-deploy checks (blob reachability, Key Vault cert read, `az deployment group validate`) can't reach those resources and the run fails. The workflow and its reference ([`docs/ci-cd.md`](docs/ci-cd.md)) are kept for when a **self-hosted runner inside the VNet** is configured — until then, deploy from a laptop/jumpbox as above. The pipeline reads the **same** `main.bicepparam` and calls the **same** [`scripts/Publish-DscArtifact.ps1`](scripts/Publish-DscArtifact.ps1), so the two paths stay in sync.
 
-```powershell
-# Preview only (artifacts get published; readiness checks run; deployment is what-if)
-./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount contosordsart01
-
-# Apply (prompts for DOMAIN_JOIN_PASSWORD / LOCAL_ADMIN_PASSWORD if not already in env)
-./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount contosordsart01
-```
-
 Equivalent broken-down `az` commands (when scripts fail and you want to debug): [`docs/manual-deploy.md`](docs/manual-deploy.md).
 
 ### Tier 2 — Post-deploy operations
 
 After the first successful deploy you need to do four things, **none** of which are inside Bicep's scope:
 
-1. **Public CNAME** *(vanity-FQDN deploys only)* — point `rds.contoso.com` → the `gatewayFqdn` output of the deployment. For Azure DNS:
+> [!NOTE]
+> **App Proxy mode** (`-UseAppProxy` / `-CertMode LetsEncrypt`) has a different post-deploy: the public CNAME points `rds.contoso.com` → `<app>.msappproxy.net` (not the LB `gatewayFqdn`), you add an **internal split-horizon A record** (`rds` → the RD Gateway's private IP), and you install + register the **connector**. Full steps: [`docs/app-proxy.md`](docs/app-proxy.md). Steps 2–4 below still apply.
+
+1. **Public CNAME** *(LB-mode vanity-FQDN deploys)* — point `rds.contoso.com` → the `gatewayFqdn` output of the deployment. For Azure DNS:
 
    ```powershell
    ./scripts/Set-GatewayCname.ps1 -ZoneName contoso.com -RecordName rds -Verify
