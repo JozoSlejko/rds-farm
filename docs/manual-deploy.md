@@ -2,6 +2,10 @@
 
 [← Back to main README](../README.md)
 
+This guide takes you from a cloned repo on a VNet-connected host to a working RD
+Web sign-in — deploying the farm by hand with `az`, the same `main.bicep` /
+`main.bicepparam` flow the pipeline would run.
+
 > [!IMPORTANT]
 > **This is the working deploy path today.** The GitHub Actions pipeline can't
 > complete from GitHub-hosted runners: the artifacts storage account and Key
@@ -58,6 +62,33 @@ After step 12 returns success, opening `https://<publicGatewayFqdn>/RDWeb/` from
 > ```
 >
 > The wrapper packages `dsc/Configuration.ps1` via [`scripts/Publish-DscArtifact.ps1`](../scripts/Publish-DscArtifact.ps1), sets `ARTIFACTS_LOCATION`/`ARTIFACTS_STORAGE_ACCOUNT` for the process, prompts for `DOMAIN_JOIN_PASSWORD`/`LOCAL_ADMIN_PASSWORD` if missing, and runs `az deployment group what-if` (always) and `az deployment group create` (when `-Action deploy`). The DSC extension reads `Configuration.zip` back at apply-time using the VM's user-assigned managed identity (no SAS — the SA blocks SAS via tenant policy). The sections below remain the canonical reference for what each step does under the hood.
+
+## Before you start
+
+Have these ready before step 1 — each bullet says how to get or confirm it:
+
+- **A host with line-of-sight to the VNet** — a laptop on the VPN or an in-VNet
+  jumpbox. The artifacts storage account and Key Vault are private-endpoint-only,
+  so a machine outside the VNet can't reach them. Confirm with
+  `nslookup <sa>.blob.core.windows.net` resolving to a `10.x` private IP.
+- **The rds-farm repo cloned locally**, with your shell `cd`'d into it.
+- **PowerShell 7+** (`$PSVersionTable.PSVersion` shows 7 or higher) and **Azure
+  CLI signed in** (`az login`; `az account show` lists the right subscription).
+  You need Owner or Contributor on the farm subscription.
+- **`az bicep` installed** (`az bicep version`; install with `az bicep install`).
+- **The artifacts storage account name**, and — if you're binding a TLS cert — the
+  **Key Vault name**. Both are produced by Tier 0; if you ran
+  [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) they're
+  already in `main.bicepparam`.
+- **Know whether Tier 0 has run.** If it has, `main.bicepparam` is fully populated
+  and you can **skip steps 3 and 4**. If not, you'll create the cert and edit the
+  param file by hand in those steps.
+- **The two deploy secrets to hand:** the domain-join service account password and
+  the local admin password (you paste them into your shell in step 2).
+- **Upload rights on the storage account** — *Storage Blob Data Contributor* on the
+  artifacts SA for your own identity, because step 1 uploads with
+  `--auth-mode login`. If you also do the cert steps, you need *Key Vault
+  Certificates Officer* on the vault (granted in step 3a).
 
 ## 1. Package and upload DSC artifacts
 

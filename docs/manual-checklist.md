@@ -2,6 +2,9 @@
 
 [← Back to main README](../README.md)
 
+Work top to bottom to take a fresh environment from nothing to a working RD Web
+sign-in: each box is one action, ordered by when it runs.
+
 > [!IMPORTANT]
 > This is the printable / tickable companion to the [Deployment guide in the README](../README.md#deployment-guide). It is grouped into **Prerequisites → Tier 0 → Tier 1 → Tier 2** so you can see when each item runs and who owns it.
 >
