@@ -21,7 +21,7 @@
 .PARAMETER GitHubRepo
     <org>/<repo>, same format as Initialize-CiPrerequisites.ps1.
 
-.PARAMETER AppDisplayName
+.PARAMETER GhAppDisplayName
     Default: 'gh-rds-farm-deploy'.
 
 .PARAMETER SubscriptionId
@@ -43,7 +43,7 @@ param(
     [ValidatePattern('^[^/]+/[^/]+$')]
     [string]$GitHubRepo,
 
-    [string]$AppDisplayName = 'gh-rds-farm-deploy',
+    [string]$GhAppDisplayName = 'gh-rds-farm-deploy',
     [string]$SubscriptionId
 )
 
@@ -93,19 +93,19 @@ if ($SubscriptionId) {
 $SubscriptionId = $ctx.id
 Write-Host "    Subscription : $($ctx.name) ($SubscriptionId)"
 Write-Host "    Repo         : $GitHubRepo"
-Write-Host "    App          : $AppDisplayName"
+Write-Host "    App          : $GhAppDisplayName"
 Write-Host ('-' * 60)
 
 # ---------------------------------------------------------------------------
 # 1. Entra app + SP
 # ---------------------------------------------------------------------------
-$app = az ad app list --display-name $AppDisplayName --query '[0]' -o json | ConvertFrom-Json
+$app = az ad app list --display-name $GhAppDisplayName --query '[0]' -o json | ConvertFrom-Json
 if (-not $app) {
-    Write-TestResult "Entra app '$AppDisplayName' exists" $false 'Re-run Initialize-CiPrerequisites.ps1.'
+    Write-TestResult "Entra app '$GhAppDisplayName' exists" $false 'Re-run Initialize-CiPrerequisites.ps1.'
     Write-Host "Aborting further checks (no app to inspect)." -ForegroundColor Red
     exit 1
 }
-Write-TestResult "Entra app '$AppDisplayName' exists" $true
+Write-TestResult "Entra app '$GhAppDisplayName' exists" $true
 $AppId = $app.appId
 
 $sp = az ad sp list --filter "appId eq '$AppId'" --query '[0]' -o json | ConvertFrom-Json

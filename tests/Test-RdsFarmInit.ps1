@@ -35,7 +35,7 @@
 .PARAMETER GitHubRepo
     <owner>/<repo>. Forwarded to Test-CiPrerequisites.ps1.
 
-.PARAMETER AppDisplayName
+.PARAMETER GhAppDisplayName
     Entra app display name. Default 'gh-rds-farm-deploy'. Forwarded to
     Test-CiPrerequisites.ps1.
 
@@ -64,7 +64,7 @@
 
 .PARAMETER SkipCi
     Skip Test-CiPrerequisites.ps1 (use when you ran Initialize-RdsFarm.ps1
-    with -SkipCiBootstrap or you do not have 'gh' available).
+    with -GhSkipCiBootstrap or you do not have 'gh' available).
 
 .PARAMETER SkipPreDeploy
     Skip Test-PreDeployReadiness.ps1 (use when KV / VNet are in a subscription
@@ -87,7 +87,7 @@ param(
     [ValidatePattern('^[^/]+/[^/]+$')]
     [string]$GitHubRepo,
 
-    [string]$AppDisplayName = 'gh-rds-farm-deploy',
+    [string]$GhAppDisplayName = 'gh-rds-farm-deploy',
     [string]$SubscriptionId,
 
     [string]$ResourceGroup  = 'rds-farm-rg',
@@ -163,7 +163,7 @@ foreach ($p in @($ciScript, $paramScript, $preDeployScript)) {
 Write-Host ''
 Write-Host 'Verifying Tier 0 (Initialize-RdsFarm.ps1) output' -ForegroundColor Green
 Write-Host ("  GitHub repo     : {0}" -f $GitHubRepo)
-Write-Host ("  App display     : {0}" -f $AppDisplayName)
+Write-Host ("  App display     : {0}" -f $GhAppDisplayName)
 Write-Host ('  Target RG       : {0}{1}' -f $ResourceGroup, $(if ($Location) { " ($Location)" } else { '' }))
 Write-Host ("  Bicepparam      : {0}" -f $BicepParamFile)
 if ($SkipCi)        { Write-Host '  [skip] CI prerequisites check' -ForegroundColor DarkYellow }
@@ -176,8 +176,8 @@ $results = New-Object System.Collections.Generic.List[pscustomobject]
 # ---------------------------------------------------------------------------
 if (-not $SkipCi) {
     $ciArgs = @{
-        GitHubRepo     = $GitHubRepo
-        AppDisplayName = $AppDisplayName
+        GitHubRepo       = $GitHubRepo
+        GhAppDisplayName = $GhAppDisplayName
     }
     if ($SubscriptionId) { $ciArgs['SubscriptionId'] = $SubscriptionId }
 

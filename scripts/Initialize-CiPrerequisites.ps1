@@ -39,8 +39,8 @@
 .PARAMETER SubscriptionId
     Optional. Defaults to the subscription `az account show` returns.
 
-.PARAMETER AppDisplayName
-    Display name for the Entra app. Default: 'gh-rds-farm-deploy'.
+.PARAMETER GhAppDisplayName
+    Display name for the Entra app the GitHub pipeline uses. Default: 'gh-rds-farm-deploy'.
 
 .PARAMETER ArtifactsStorageAccount
     Optional. If you ALREADY have an artifacts storage account, pass its name
@@ -58,7 +58,7 @@
     main.bicep into. When set, written to GitHub as the AZURE_RESOURCE_GROUP
     repo variable. If omitted, the workflow falls back to 'rds-farm-rg'.
 
-.PARAMETER RequireProductionApproval
+.PARAMETER GhRequireProductionApproval
     Switch. If set, the 'production' environment is created with the current
     GitHub user marked as a required reviewer. Requires GitHub Pro/Team/
     Enterprise on private repos.
@@ -70,7 +70,7 @@
     .\scripts\Initialize-CiPrerequisites.ps1 `
         -GitHubRepo 'contoso/rds-farm' `
         -ArtifactsStorageAccount 'contosoartifacts01' `
-        -RequireProductionApproval
+        -GhRequireProductionApproval
 
 .NOTES
     Prerequisites on the machine running this script:
@@ -90,7 +90,7 @@ param(
 
     [string]$SubscriptionId,
 
-    [string]$AppDisplayName = 'gh-rds-farm-deploy',
+    [string]$GhAppDisplayName = 'gh-rds-farm-deploy',
 
     [string]$ArtifactsStorageAccount,
 
@@ -98,7 +98,7 @@ param(
 
     [string]$FarmResourceGroup,
 
-    [switch]$RequireProductionApproval,
+    [switch]$GhRequireProductionApproval,
 
     # Skip the read-only self-check at the end (Test-CiPrerequisites.ps1).
     # The orchestrator (Initialize-RdsFarm.ps1) sets this because the
@@ -181,12 +181,12 @@ if ($LASTEXITCODE -ne 0) { throw "GitHub CLI not authenticated. Run 'gh auth log
 Write-Host ""
 Write-Host "==> Step 1: Entra app + service principal" -ForegroundColor Green
 
-$app = az ad app list --display-name $AppDisplayName --query '[0]' -o json | ConvertFrom-Json
+$app = az ad app list --display-name $GhAppDisplayName --query '[0]' -o json | ConvertFrom-Json
 if (-not $app) {
-    Write-Host "  Creating Entra app '$AppDisplayName'..."
-    $app = az ad app create --display-name $AppDisplayName -o json | ConvertFrom-Json
+    Write-Host "  Creating Entra app '$GhAppDisplayName'..."
+    $app = az ad app create --display-name $GhAppDisplayName -o json | ConvertFrom-Json
 } else {
-    Write-Host "  Reusing existing Entra app '$AppDisplayName' (appId=$($app.appId))"
+    Write-Host "  Reusing existing Entra app '$GhAppDisplayName' (appId=$($app.appId))"
 }
 $AppId = $app.appId
 
@@ -342,7 +342,7 @@ Write-Host "==> Step 6: GitHub environments" -ForegroundColor Green
 
 foreach ($envName in @('preview','production')) {
     Write-Host "  Creating/updating environment '$envName'..."
-    if ($envName -eq 'production' -and $RequireProductionApproval) {
+    if ($envName -eq 'production' -and $GhRequireProductionApproval) {
         $me = gh api user --jq .id
         if ($LASTEXITCODE -ne 0) { throw "Failed to query current GitHub user." }
         $body = @{
@@ -401,7 +401,7 @@ if (Test-Path -LiteralPath $selfCheck) {
     Write-Host "==> Step 7: Self-check (tests/Test-CiPrerequisites.ps1)" -ForegroundColor Green
     Write-Host "    Verifying everything the bootstrap just created is in place..."
     try {
-        & $selfCheck -GitHubRepo $GitHubRepo -AppDisplayName $AppDisplayName -SubscriptionId $SubscriptionId
+        & $selfCheck -GitHubRepo $GitHubRepo -GhAppDisplayName $GhAppDisplayName -SubscriptionId $SubscriptionId
         if ($LASTEXITCODE -ne 0) {
             Write-Host ""
             Write-Host "Self-check reported issues (see PASS/WARN/FAIL output above)." -ForegroundColor Yellow

@@ -185,11 +185,11 @@
     Resource group that holds the Azure DNS challenge zone (created if missing).
     Only for -CertMode LetsEncrypt. Default: 'rds-dns-rg'.
 
-.PARAMETER AppDisplayName
-    Display name for the Entra app the pipeline uses. Default:
+.PARAMETER GhAppDisplayName
+    Display name for the Entra app the GitHub pipeline uses. Default:
     'gh-rds-farm-deploy'.
 
-.PARAMETER RequireProductionApproval
+.PARAMETER GhRequireProductionApproval
     Switch. Mark the 'production' GitHub environment as requiring approval
     from the current GitHub user. Requires GH Pro/Team/Enterprise on private
     repos.
@@ -197,7 +197,7 @@
 .PARAMETER BicepParamFile
     Path to main.bicepparam to patch. Default: <repo>/main.bicepparam.
 
-.PARAMETER SkipCiBootstrap
+.PARAMETER GhSkipCiBootstrap
     Skip step 3 (Entra app + federated creds + GitHub secrets). Use only if
     you've already run scripts/Initialize-CiPrerequisites.ps1 successfully
     against this repo.
@@ -239,7 +239,7 @@
         -ArtifactsStorageAccount contosordsart01 `
         -KeyVaultName contoso-rds-kv01 `
         -CertMode Csr `
-        -RequireProductionApproval
+        -GhRequireProductionApproval
 
 .EXAMPLE
     # Interactive lab setup — script prompts for every missing required value.
@@ -355,12 +355,12 @@ param(
     [string]$AcmeDnsResourceGroup = 'rds-dns-rg',
 
     # CI bootstrap
-    [string]$AppDisplayName = 'gh-rds-farm-deploy',
-    [switch]$RequireProductionApproval,
+    [string]$GhAppDisplayName = 'gh-rds-farm-deploy',
+    [switch]$GhRequireProductionApproval,
 
     # File + skip toggles
     [string]$BicepParamFile = (Join-Path $PSScriptRoot '..' 'main.bicepparam'),
-    [switch]$SkipCiBootstrap,
+    [switch]$GhSkipCiBootstrap,
     [switch]$SkipPrereqsDeploy,
 
     # UX
@@ -664,8 +664,8 @@ $script:RdsFarmInitConfigSections = @(
     @{ Title = 'Application proxy'   ; Params = @('UseAppProxy') }
     @{ Title = 'Prereqs (KV + SA)'   ; Params = @('ArtifactsStorageAccount','KeyVaultName','ArtifactsResourceGroup','KeyVaultResourceGroup','FarmResourceGroup') }
     @{ Title = 'TLS cert'            ; Params = @('CertMode','PfxPath','CertName','AcmeContactEmail','AcmeDnsZoneName','AcmeDnsResourceGroup') }
-    @{ Title = 'CI bootstrap'        ; Params = @('AppDisplayName','RequireProductionApproval') }
-    @{ Title = 'File + skip toggles' ; Params = @('BicepParamFile','SkipCiBootstrap','SkipPrereqsDeploy') }
+    @{ Title = 'CI bootstrap'        ; Params = @('GhAppDisplayName','GhRequireProductionApproval') }
+    @{ Title = 'File + skip toggles' ; Params = @('BicepParamFile','GhSkipCiBootstrap','SkipPrereqsDeploy') }
 )
 
 function Get-AllowedConfigParams {
@@ -918,14 +918,14 @@ if ($Interactive) {
         -Default $CertName `
         -Hint 'Name of the cert object inside KV. Reused on re-runs to update an existing cert.'
 
-    $AppDisplayName = Read-OptionalString `
+    $GhAppDisplayName = Read-OptionalString `
         -Prompt 'Entra app display name (for GitHub OIDC)' `
-        -Default $AppDisplayName `
+        -Default $GhAppDisplayName `
         -Hint 'Display name of the Entra app the GitHub Actions workflow logs in as via federated credentials.'
 
-    $RequireProductionApproval = [bool] (Read-OptionalSwitch `
+    $GhRequireProductionApproval = [bool] (Read-OptionalSwitch `
         -Prompt 'Require approval on the production GitHub environment?' `
-        -Default $RequireProductionApproval.IsPresent `
+        -Default $GhRequireProductionApproval.IsPresent `
         -Hint 'Adds yourself as the required reviewer for deploys to production. Needs GH Pro/Team/Enterprise on private repos.')
 
     # File + skip toggles
@@ -934,9 +934,9 @@ if ($Interactive) {
         -Default $BicepParamFile `
         -Hint 'The script patches network/AD/gateway values into this file. Defaults to <repo>/main.bicepparam.'
 
-    $SkipCiBootstrap = [bool] (Read-OptionalSwitch `
+    $GhSkipCiBootstrap = [bool] (Read-OptionalSwitch `
         -Prompt 'Skip CI bootstrap (Entra app + federated creds + GitHub secrets)?' `
-        -Default $SkipCiBootstrap.IsPresent `
+        -Default $GhSkipCiBootstrap.IsPresent `
         -Hint 'Set Y when Initialize-CiPrerequisites.ps1 has already run successfully against this repo.')
 
     $SkipPrereqsDeploy = [bool] (Read-OptionalSwitch `
@@ -1184,9 +1184,9 @@ if ($CertMode -eq 'LetsEncrypt') {
     Write-Host "    ACME challenge zone (AzDNS)  : $AcmeDnsZoneName (RG $AcmeDnsResourceGroup)"
     Write-Host "    Let's Encrypt contact        : $AcmeContactEmail"
 }
-Write-Host "    Entra app display name       : $AppDisplayName"
-Write-Host "    Production approval required : $([bool]$RequireProductionApproval)"
-Write-Host "    Skip CI bootstrap            : $([bool]$SkipCiBootstrap)"
+Write-Host "    Entra app display name       : $GhAppDisplayName"
+Write-Host "    Production approval required : $([bool]$GhRequireProductionApproval)"
+Write-Host "    Skip CI bootstrap            : $([bool]$GhSkipCiBootstrap)"
 Write-Host "    Skip prereqs Bicep deploy    : $([bool]$SkipPrereqsDeploy)"
 Write-Host "    --------------------------------------------------------------"
 Write-Host ""
@@ -1236,15 +1236,15 @@ if ($confirm -notmatch '^(y|yes)$') {
 # ---------------------------------------------------------------------------
 # 2. CI bootstrap (Entra app, federated creds, GH secrets/envs)
 # ---------------------------------------------------------------------------
-if (-not $SkipCiBootstrap) {
+if (-not $GhSkipCiBootstrap) {
     Write-Host ""
     Write-Host "==> Step 2: CI bootstrap (Initialize-CiPrerequisites.ps1)" -ForegroundColor Green
     Write-Host "    You will be prompted ONCE for DOMAIN_JOIN_PASSWORD and LOCAL_ADMIN_PASSWORD."
     Write-Host "    Both are stored only as GitHub repo secrets — never written to disk."
 
     $ciArgs = @{
-        GitHubRepo     = $GitHubRepo
-        AppDisplayName = $AppDisplayName
+        GitHubRepo       = $GitHubRepo
+        GhAppDisplayName = $GhAppDisplayName
         # Skip the inner self-check: the storage account it verifies doesn't
         # exist yet (Step 4 creates it). Test-RdsFarmInit.ps1 at the end
         # checks everything once everything actually exists.
@@ -1261,7 +1261,7 @@ if (-not $SkipCiBootstrap) {
     # the workflow's hard-coded defaults, not the region you chose here).
     if ($Location)                { $ciArgs['Location']                = $Location }
     if ($FarmResourceGroup)       { $ciArgs['FarmResourceGroup']       = $FarmResourceGroup }
-    if ($RequireProductionApproval) { $ciArgs['RequireProductionApproval'] = $true }
+    if ($GhRequireProductionApproval) { $ciArgs['GhRequireProductionApproval'] = $true }
 
     & $initCi @ciArgs
     if ($LASTEXITCODE -ne 0) {
@@ -1269,16 +1269,16 @@ if (-not $SkipCiBootstrap) {
     }
 } else {
     Write-Host ""
-    Write-Host "==> Step 2: CI bootstrap SKIPPED (per -SkipCiBootstrap)" -ForegroundColor Yellow
+    Write-Host "==> Step 2: CI bootstrap SKIPPED (per -GhSkipCiBootstrap)" -ForegroundColor Yellow
 }
 
 # Resolve the CI service principal object ID (created by step 2 or already there).
 Write-Host ""
 Write-Host "==> Step 3: Resolve principals for adminPrincipals" -ForegroundColor Green
-$ciApp = az ad app list --display-name $AppDisplayName --query '[0]' -o json | ConvertFrom-Json
-if (-not $ciApp) { throw "Entra app '$AppDisplayName' not found. Run without -SkipCiBootstrap first." }
+$ciApp = az ad app list --display-name $GhAppDisplayName --query '[0]' -o json | ConvertFrom-Json
+if (-not $ciApp) { throw "Entra app '$GhAppDisplayName' not found. Run without -GhSkipCiBootstrap first." }
 $ciSp  = az ad sp list --filter "appId eq '$($ciApp.appId)'" --query '[0]' -o json | ConvertFrom-Json
-if (-not $ciSp) { throw "Service principal for app '$AppDisplayName' not found." }
+if (-not $ciSp) { throw "Service principal for app '$GhAppDisplayName' not found." }
 $ciSpObjectId = $ciSp.id
 $myObjectId   = Get-MyObjectId
 Write-Host "    Current user object id : $myObjectId"
