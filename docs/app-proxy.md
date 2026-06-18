@@ -277,8 +277,8 @@ enterprise app for defense-in-depth.
   outputs via the `!` pattern.
 - ✅ `modules/network.bicep` — `writeInternetInboundRules` (= `!useAppProxy`) gates
   the two internet-facing inbound NSG rules.
-- ✅ `scripts/Initialize-RdsFarm.ps1` (Tier 0) — `-UseAppProxy` (+ `-PublicGatewayFqdn`
-  + Step 6 bicepparam patching).
+- ✅ `scripts/Initialize-RdsFarm.ps1` (Tier 0) — `-UseAppProxy` + `-PublicGatewayFqdn`
+  (Step 6 patches these into `main.bicepparam`).
 - ✅ `main.bicepparam` — declares `useAppProxy`; Tier 0 owns the value.
 
 ### Phase 3 — Docs + tests

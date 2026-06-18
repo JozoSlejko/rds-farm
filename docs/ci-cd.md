@@ -11,6 +11,8 @@
 > for when a **self-hosted runner inside the VNet** is configured — at which point it becomes
 > usable as written.
 
+<!-- -->
+
 > [!NOTE]
 > **Where this fits in the tier model.** Everything on this page is either **Tier 0** (the one-time bootstrap — normally driven by [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)) or **Tier 1** (the pipeline itself — runs in GitHub Actions on every push/PR). See [README → Deployment guide](../README.md#deployment-guide).
 >
