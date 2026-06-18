@@ -286,147 +286,229 @@ enterprise app for defense-in-depth.
 
 ---
 
-## Deploying — enabling App Proxy (step by step)
+## Deploying — enabling App Proxy
 
-End-to-end runbook to switch the farm from the public load balancer to Microsoft
-Entra application proxy. Run the **script** steps from an **in-VNet host** (Key
-Vault is private-endpoint-only). Expect a short maintenance window between the
-deploy (step 6) and connector registration (step 7) when RDS is briefly
-unreachable.
+**Who this is for, and what you'll have at the end:** an operator switching the
+farm from its public load balancer to Microsoft Entra application proxy. When you
+finish, users reach RD Web at `https://rds.slejco.com/RDWeb/` only after signing in
+to Entra ID (Conditional Access + MFA), and the farm has **no public inbound**.
 
-> [!NOTE]
-> Pre-flight: Entra ID **P1** + an **Application Administrator** account, the
-> `RDS-Users` group **synced** to Entra, `slejco.com` publicly owned at GoDaddy,
-> and `az` + `gh` signed in.
+Run every `az` / PowerShell step from a host **inside the VNet** (a jumpbox, or a
+laptop on the VPN). Key Vault and the artifacts storage account are
+private-endpoint-only, so a public machine can't reach them.
 
-### 1. Delegate the ACME challenge zone to Azure DNS
+> [!WARNING]
+> Steps 6 and 7 are a brief outage: between flipping the farm (step 6) and
+> registering the connector (step 7), RDS is unreachable. Do them in a planned
+> maintenance window.
 
-Create a public zone for the challenge alias and read its name servers:
+### Before you start
+
+Have all of these ready — each bullet says how to get or confirm it:
+
+- **An Entra ID P1 (or P2) license** — App Proxy and Conditional Access require it.
+  Check in the Entra admin center under *Billing → Licenses*.
+- **An account with the Application Administrator role** (to publish the app and
+  register the connector). Confirm under *Roles and administrators*.
+- **`slejco.com` registered to you with its DNS managed at GoDaddy** — you'll add
+  public records there.
+- **An `RDS-Users` group in Entra ID** (cloud-only or synced from AD); only its
+  members get through. Confirm with `az ad group show --group RDS-Users`.
+- **Signed in on the in-VNet host:** `az login` and `gh auth login`, as an account
+  with Owner/Contributor on the subscription.
+
+### 1. Delegate the ACME challenge DNS zone to Azure DNS
+
+**Why:** Let's Encrypt (the certificate authority that issues the cert) proves you
+control `rds.slejco.com` by reading a DNS TXT record. GoDaddy's DNS API is locked
+down, so you host *just that one challenge record* in an Azure DNS zone the renewal
+script can write to, and point GoDaddy at it once.
+
+Create the zone and print the four name servers Azure assigns it:
 
 ```bash
 az group create -n rds-dns-rg -l italynorth
 az network dns zone create -g rds-dns-rg -n acme.slejco.com
-az network dns zone show -g rds-dns-rg -n acme.slejco.com --query nameServers -o tsv
+az network dns zone show  -g rds-dns-rg -n acme.slejco.com --query nameServers -o tsv
 ```
 
-Then, at **GoDaddy** (`slejco.com`), add these two **one-time** records:
+Then, in the **GoDaddy DNS portal** for `slejco.com` (*My Products → DNS → Manage
+Zones → slejco.com*), add these two records once — they never change again:
 
-| Record | Type | Value |
+| Host / Name | Type | Value |
 | --- | --- | --- |
-| `acme` | NS | the 4 Azure DNS name servers printed above |
+| `acme` | NS | the four name servers printed above (one NS record each) |
 | `_acme-challenge.rds` | CNAME | `rds.acme.slejco.com` |
 
-### 2. Let the renewal identity write TXT records
+**Result:** `nslookup -type=NS acme.slejco.com 1.1.1.1` returns the Azure name servers.
 
-`posh-acme` writes the challenge TXT via the renewal host's managed identity
-(default) or a service principal. Grant it least privilege on the zone's RG:
+### 2. Give the renewal host permission to write the challenge record
+
+**Who/what:** the cert script (`New-LetsEncryptRdsCertificate.ps1`) runs on an
+**Azure VM inside the VNet**; that VM's **managed identity** (an Azure AD identity
+attached to the VM, used instead of a stored password) writes the TXT record into
+the `acme.slejco.com` zone. Grant that identity the least-privilege **DNS Zone
+Contributor** role, scoped to only the DNS resource group:
 
 ```bash
+# <renewal-host-rg>/<renewal-host>: the resource group and name of the in-VNet VM
+# you run the cert script on (e.g. a jumpbox that has a system-assigned identity).
 PRINCIPAL=$(az vm identity show -g <renewal-host-rg> -n <renewal-host> --query principalId -o tsv)
-az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal \
-    --role "DNS Zone Contributor" --scope $(az group show -n rds-dns-rg --query id -o tsv)
+az role assignment create \
+    --assignee-object-id "$PRINCIPAL" --assignee-principal-type ServicePrincipal \
+    --role "DNS Zone Contributor" \
+    --scope "$(az group show -n rds-dns-rg --query id -o tsv)"
 ```
 
-### 3. Issue the Let's Encrypt certificate
+**Result:** the identity appears under *rds-dns-rg → Access control (IAM) → Role
+assignments*. (No managed identity on the host yet? Add one with `az vm identity
+assign`, or use a service principal via the script's `-UseServicePrincipal` switch.)
 
-From the in-VNet host — **staging first** to validate delegation, then production:
+### 3. Issue the TLS certificate from Let's Encrypt
+
+Run the cert script on the in-VNet host **with `-Staging` first**. *Staging* is
+Let's Encrypt's rate-limit-free **test environment** — it issues a cert your
+browser won't trust, but it proves the DNS delegation from steps 1–2 works without
+spending the strict production quota. When staging succeeds, run again **without**
+`-Staging` for the real, browser-trusted certificate:
 
 ```powershell
-./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com -Staging   # dry run
-$cert = ./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com     # production
+# Test run against staging - validates DNS only; the cert it makes is untrusted.
+./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com -Staging
+
+# Real run - issues the trusted cert and imports it into Key Vault.
+$cert = ./scripts/New-LetsEncryptRdsCertificate.ps1 -Contact you@slejco.com
 ```
 
-It imports the cert into Key Vault `rds-tls` and stages a PFX. Keep `$cert` — it
-carries `PfxPath` and `PfxPassword` for the next step.
+`-Contact` is the email Let's Encrypt uses for expiry notices.
 
-### 4. Publish the application proxy app
+**Result:** the real run imports the cert into Key Vault secret `rds-tls` and
+stages a PFX file. The returned `$cert` object holds `$cert.PfxPath` and
+`$cert.PfxPassword` — **you pass both to step 4.**
+
+### 4. Publish the application proxy application
+
+This creates the Entra **enterprise application** that fronts the farm and uploads
+the step-3 cert to it:
 
 ```powershell
-./scripts/Configure-AppProxy.ps1 -PfxPath $cert.PfxPath -PfxPassword $cert.PfxPassword `
+./scripts/Configure-AppProxy.ps1 `
+    -PfxPath $cert.PfxPath -PfxPassword $cert.PfxPassword `
     -AssignGroupName 'RDS-Users'
 ```
 
-This instantiates the app, sets Entra pre-auth + the RDS flags, uploads the
-custom-domain cert, creates the `RDS Connectors` group, and assigns `RDS-Users`.
-**Note the `<app>.msappproxy.net` target** it prints (also shown in the Entra
-admin center under the app's *Application Proxy* blade).
+It turns on Entra pre-authentication, sets the RDS publishing flags, uploads the
+custom-domain cert, creates a **connector group** named `RDS Connectors` (a named
+set of connectors that serve an app), and grants `RDS-Users` access.
 
-### 5. Point DNS at the proxy (split-horizon)
+**Result:** the script prints an **external endpoint** such as
+`rds-farm-xxxx.msappproxy.net`. **Copy that value — you point the public CNAME at
+it in step 5.** (It's also in the Entra admin center under *Enterprise
+applications → RDS Farm (Entra App Proxy) → Application proxy → External URL*.)
 
-| Where | Record | Type | Value |
+### 5. Point the vanity name at the proxy (split-horizon DNS)
+
+`rds.slejco.com` must resolve **differently outside vs. inside** the network —
+called *split-horizon DNS*. Outside, clients reach the App Proxy edge; inside, the
+connector must reach the gateway directly. Add one record in each zone:
+
+| Add it in… | Host / Name | Type | Value |
 | --- | --- | --- | --- |
-| GoDaddy (public) | `rds` | CNAME | `<app>.msappproxy.net` |
-| AD DNS (internal) | `rds` | A | RD Gateway **private** IP |
+| **Public:** GoDaddy DNS for `slejco.com` | `rds` | CNAME | the `…msappproxy.net` value from step 4 |
+| **Internal:** your AD DNS `slejco.com` zone (DNS Manager on a DC, or `Add-DnsServerResourceRecordA`) | `rds` | A | the RD Gateway VM's **private** IP |
 
-### 6. Flip the farm to App Proxy mode and deploy
+**Result:** from outside the network `nslookup rds.slejco.com` shows the
+`msappproxy.net` alias; from a domain-joined host it shows the gateway's private IP.
 
-Re-run Tier 0 so it owns the params (never hand-edit `main.bicepparam`):
+### 6. Flip the farm to App Proxy mode, then deploy
+
+Two actions, in order.
+
+**6a — Set the App Proxy parameters via Tier 0.** Tier 0
+(`Initialize-RdsFarm.ps1`) owns `main.bicepparam`; never hand-edit that file. Pass
+the three App Proxy flags **plus the exact same arguments you used on your first
+Tier 0 run** (VNet, AD, storage, cert, etc. — the full command is in the
+[README deployment guide](../README.md#deployment-guide)):
 
 ```powershell
-./scripts/Initialize-RdsFarm.ps1 -UseAppProxy -AppProxyExternalFqdn rds.slejco.com `
-    -PublicGatewayFqdn rds.slejco.com   # ...plus your usual Tier 0 args
+# Re-run your original Tier 0 command, adding the three App Proxy flags:
+./scripts/Initialize-RdsFarm.ps1 -UseAppProxy `
+    -AppProxyExternalFqdn rds.slejco.com `
+    -PublicGatewayFqdn rds.slejco.com `
+    -GitHubRepo 'owner/repo' -AdDomainName slejco.com   # ...and the rest of your Tier 0 args
 ```
 
-That sets `useAppProxy=true` and points `appProxyExternalFqdn`, `publicGatewayFqdn`,
-and `certificateSubject` at `rds.slejco.com`. Then deploy:
+- `-UseAppProxy` turns App Proxy mode on.
+- `-AppProxyExternalFqdn` is the external hostname users type.
+- `-PublicGatewayFqdn` is set to the **same** value so internal and external
+  FQDNs match (the HTML5 web client requires that).
+
+This writes `useAppProxy=true` and points `appProxyExternalFqdn`, `publicGatewayFqdn`,
+and `certificateSubject` at `rds.slejco.com` in `main.bicepparam`.
+
+**6b — Deploy.** `<sa>` is your artifacts storage account name and `<rg>` is the
+farm's resource group — the same two values you pass on every deploy:
 
 ```powershell
 ./scripts/Invoke-ManualDeploy.ps1 -Action what-if -StorageAccount <sa> -ResourceGroup <rg>
 ./scripts/Invoke-ManualDeploy.ps1 -Action deploy  -StorageAccount <sa> -ResourceGroup <rg>
 ```
 
-The what-if adds the **connector VM**, drops the gateway NIC from the LB backend
-pool, and rebinds the gateway to the `rds.slejco.com` cert with pre-auth enabled.
+**Result:** the what-if shows a **connector VM** added, the gateway NIC leaving the
+load-balancer pool, and the gateway rebound to the `rds.slejco.com` cert with
+pre-auth on. The deploy runs the health test automatically at the end.
 
 > [!IMPORTANT]
-> The deploy is **incremental** — it does **not** delete the existing public IP,
-> load balancer, or the internet inbound NSG rules. They are left orphaned;
-> remove them in step 8.
+> The deploy is **incremental** — it does **not** delete the now-unused public IP,
+> load balancer, or internet inbound NSG rules. They sit idle until you remove them
+> in step 8.
 
-### 7. Install + register the connector
+### 7. Install and register the connector software
 
-The farm deployed the connector **VM** in step 6; the software is an admin step
-(registration needs an interactive Entra token). On the new connector VM:
+Step 6 created the connector **VM**, but the **connector software** is installed
+and registered by hand — registration opens a browser to sign you in to Entra, so
+it can't run inside the deploy. Connect to the new VM `rds-apc-01` (via Bastion) and:
 
-1. Download the **Microsoft Entra private network connector** (Entra admin center →
-   *Application proxy* → **Download connector service**) — version **1.5.1975.0+**.
-2. Run the installer and sign in as an Application Administrator to register it.
-3. In the portal, confirm the connector is **Active**, then move it into the
-   **`RDS Connectors`** group (or re-run `Configure-AppProxy.ps1 -ConnectorId <id>`).
+1. In the **Entra admin center** → *Enterprise applications → Application proxy*,
+   click **Download connector service**. Use **version 1.5.1975.0 or newer** (the
+   HTML5 web client requires it).
+2. Run the installer; when it prompts, **sign in as your Application Administrator**
+   to register the connector to your tenant.
+3. Still in *Application proxy*, find the new connector and **assign it to the
+   `RDS Connectors` group** — a drop-down on the connector that tells App Proxy
+   "this connector serves that group's apps." (Or run
+   `./scripts/Configure-AppProxy.ps1 -ConnectorId <id>` with the connector's id
+   from that page.)
 
-### 8. Verify and decommission
+**Result:** the connector shows **Status: Active** and sits in the `RDS Connectors`
+group in the portal.
 
-- Browse `https://rds.slejco.com/RDWeb/` — you should hit **Entra sign-in**
-  (Conditional Access / MFA) first, then RD Web.
-- `./tests/Test-PostDeployHealth.ps1 -ResourceGroupName <rg>` (it now skips the
-  public-LB checks in App Proxy mode).
-- Delete the orphaned public ingress:
+### 8. Verify, then remove the old public ingress
 
-  ```bash
-  az network lb delete  -g <rg> -n rds-gw-lb
-  az network public-ip delete -g <rg> -n rds-gw-pip
-  az network nsg rule delete -g <vnet-rg> --nsg-name <governance-nsg> -n Allow-HTTPS-from-AllowedClients
-  az network nsg rule delete -g <vnet-rg> --nsg-name <governance-nsg> -n Allow-UDP3391-from-AllowedClients
-  ```
+1. Browse to `https://rds.slejco.com/RDWeb/`. You should be redirected to the
+   **Entra sign-in page** (with MFA) first, then land on RD Web — that confirms
+   pre-auth and the connector path work end to end.
+2. Run the health test (`<rg>` = the farm resource group):
 
-> [!WARNING]
-> Don't upload a Let's Encrypt **staging** cert to App Proxy — browsers reject the
-> staging chain. Use `-Staging` only to validate the DNS-01 flow (step 3), then
-> issue and upload the production cert.
+   ```powershell
+   ./tests/Test-PostDeployHealth.ps1 -ResourceGroupName <rg>
+   ```
 
----
+   In App Proxy mode it skips the load-balancer checks and resolves the
+   `rds.slejco.com` endpoint instead.
+3. Delete the public ingress the incremental deploy left orphaned. `<rg>` = farm
+   resource group; `<vnet-rg>` and `<governance-nsg>` = the resource group and name
+   of the subnet's governance NSG (the value in `subnetNsgName`):
 
-## Prerequisites checklist
+   ```bash
+   az network lb        delete -g <rg> -n rds-gw-lb
+   az network public-ip delete -g <rg> -n rds-gw-pip
+   az network nsg rule  delete -g <vnet-rg> --nsg-name <governance-nsg> -n Allow-HTTPS-from-AllowedClients
+   az network nsg rule  delete -g <vnet-rg> --nsg-name <governance-nsg> -n Allow-UDP3391-from-AllowedClients
+   ```
 
-Before Phase 1 starts:
-
-- ☐ Entra ID **P1** licensed (confirmed) and an **Application Administrator** account.
-- ☐ `slejco.com` publicly owned and managed at GoDaddy (confirmed).
-- ☐ An Azure DNS **public zone** for `acme.slejco.com` and a **managed identity** with
-  *DNS Zone Contributor* on it (for `posh-acme`).
-- ☐ Subnet/route for the connector VM with **outbound `443`** to the App Proxy endpoints.
-- ☐ Internal DNS authority to add the split-horizon `rds.slejco.com` A record.
-- ☐ The `RDS-Users` group synced to Entra ID (pre-auth needs cloud identities).
+**Result:** no public IP, no load balancer, no internet inbound rules — the only
+way in is Entra-authenticated through the connector.
 
 ---
 
