@@ -399,6 +399,38 @@ function Assert-Tool {
     }
 }
 
+function Assert-KeyVaultReachable {
+    # Fast-fail when this host can't reach the private Key Vault DATA plane: if the
+    # vault FQDN resolves to a PUBLIC IP we're not on an in-VNet host, and the cert
+    # import would 403 (publicNetworkAccess=Disabled). .NET resolution is used (not
+    # Resolve-DnsName) so this also catches running Tier 0 from a Mac/laptop.
+    # Ambiguous results (no / failed resolution) only warn - the cert step's own
+    # error covers those.
+    param([Parameter(Mandatory)][string]$VaultName)
+
+    $kvHost = "$VaultName.vault.azure.net"
+    # RFC 1918 + CGNAT (100.64/10), the same ranges as Publish-DscArtifact.ps1.
+    $privatePattern = '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'
+    try {
+        $ips = @([System.Net.Dns]::GetHostAddresses($kvHost) |
+                Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+                ForEach-Object { $_.IPAddressToString })
+    }
+    catch {
+        Write-Warning "Could not resolve $kvHost ($($_.Exception.Message)); skipping the in-VNet host pre-check. The cert step will surface any access error."
+        return
+    }
+    if (-not $ips) {
+        Write-Warning "No IPv4 resolved for $kvHost; skipping the in-VNet host pre-check."
+        return
+    }
+    $private = @($ips | Where-Object { $_ -match $privatePattern })
+    if (-not $private) {
+        throw "$kvHost resolves to PUBLIC IP(s) [$($ips -join ', ')] from this host, so the Key Vault data plane is unreachable and the cert import would fail with HTTP 403 (public network access is disabled). Run Tier 0 from a host INSIDE the VNet - a jumpbox, the DC, or a VM via Bastion - see the 'Where code runs' note in the README."
+    }
+    Write-Host "    Key Vault data plane reachable ($kvHost -> $($private -join ', ')); host is in-VNet." -ForegroundColor DarkGray
+}
+
 function Read-RequiredString {
     param(
         [string]$Prompt,
@@ -1347,6 +1379,11 @@ if (-not $SkipPrereqsDeploy) {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "==> Step 5: TLS certificate ($CertMode)" -ForegroundColor Green
+
+# Fast-fail if this host can't reach the private Key Vault data plane. Every cert
+# mode imports into the PE-only vault, so a wrong host (e.g. a plain laptop) would
+# otherwise 403 partway through - catch it here with a clear message.
+Assert-KeyVaultReachable -VaultName $KeyVaultName
 
 $setCertUri = Join-Path $PSScriptRoot 'Set-BicepParamCertUri.ps1'
 
