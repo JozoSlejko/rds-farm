@@ -352,8 +352,9 @@ If you bootstrap with **`-CertMode LetsEncrypt`**, Tier 0
 ([`Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1)) automates the Azure
 side of this runbook: it creates the Azure DNS challenge zone, **prints the exact
 NS + CNAME to add at your registrar**, issues the Let's Encrypt cert into Key Vault,
-and publishes the App Proxy app — all using your current `az login` (no managed
-identity needed). `-CertMode LetsEncrypt` implies `-UseAppProxy`.
+and publishes the App Proxy app. The DNS-01 challenge uses your current `az login`
+(no managed identity needed), so the **issuance** works from a laptop on VPN.
+`-CertMode LetsEncrypt` implies `-UseAppProxy`.
 
 ```powershell
 # Run 1 - creates acme.<domain> in Azure DNS and prints the registrar records, then halts.
@@ -370,9 +371,13 @@ identity needed). `-CertMode LetsEncrypt` implies `-UseAppProxy`.
     -AcmeContactEmail you@slejco.com -RdsAccessGroup 'RDS-Users'
 ```
 
-> [!NOTE]
-> Publishing the app needs the **Cloud Application Administrator** role, and Tier 0
-> must run from a host with **VNet line-of-sight** (Key Vault is private-endpoint-only).
+> [!IMPORTANT]
+> The cert is imported into the **private-endpoint-only Key Vault**, so — like
+> every Tier 0 cert mode and like Tier 1 — this must run from a host with **VNet
+> line-of-sight** (laptop on VPN or in-VNet jumpbox), not a plain laptop. The
+> `az login` token covers the DNS-01 challenge (a public ARM call); the Key Vault
+> import is the part that needs line-of-sight. Publishing the app also needs the
+> **Cloud Application Administrator** role.
 
 That covers steps 1–4 below. What stays manual — and why it can't be a bootstrap step:
 

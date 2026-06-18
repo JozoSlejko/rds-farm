@@ -71,8 +71,9 @@
 
 .PARAMETER UseAzAccessToken
     Authenticate the Azure DNS plugin with an access token from the current
-    `az login` context instead of a managed identity. Use this when issuing from
-    a host with no managed identity (e.g. a laptop running Tier 0).
+    `az login` context instead of a managed identity. Use this on a host with no
+    managed identity (e.g. a laptop on VPN running Tier 0). The host still needs
+    VNet line-of-sight to import the issued cert into the private Key Vault.
 
 .PARAMETER ServicePrincipalCredential
     PSCredential for the service principal: AppId as username, client secret as

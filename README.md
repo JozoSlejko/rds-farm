@@ -97,7 +97,7 @@ flowchart LR
 | Phase | When | Where | Goal |
 | --- | --- | --- | --- |
 | **Prerequisites** | Before anything | AD / network / DNS — outside Azure | Things this repo can't create for you (AD account + group, VNet + subnet, client CIDRs, hostname plan). |
-| **Tier 0 — Bootstrap** | Once, before first deploy | Your laptop | One script ([`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1)) does it all: GitHub Actions wiring, Azure prereq RGs/KV/SA, TLS cert, fully patched `main.bicepparam`. |
+| **Tier 0 — Bootstrap** | Once, before first deploy | Laptop (VPN / jumpbox for the cert step) | One script ([`scripts/Initialize-RdsFarm.ps1`](scripts/Initialize-RdsFarm.ps1)) does it all: GitHub Actions wiring, Azure prereq RGs/KV/SA, TLS cert, fully patched `main.bicepparam`. |
 | **Tier 1 — Deploy** | Every code change | **Laptop / jumpbox with VNet line-of-sight** | `package DSC → upload (MSI) → pre-flight → what-if → deploy → post-deploy tests`. |
 | **Tier 2 — Post-deploy** | Ad-hoc | Your laptop | Public CNAME, RDS CALs activation, AD `Terminal Server License Servers` membership, smoke tests, tear-down. |
 

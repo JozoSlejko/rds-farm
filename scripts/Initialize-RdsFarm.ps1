@@ -31,6 +31,12 @@
       9. Prints next steps (Invoke-ManualDeploy.ps1 to deploy the farm from a
          laptop/jumpbox with VNet line-of-sight).
 
+    The cert step (5) does a Key Vault data-plane import (and the App Proxy
+    publish reads the staged PFX), so run Tier 0 from a host with VNet
+    line-of-sight to the private Key Vault (laptop on VPN or in-VNet jumpbox) -
+    the same requirement as Tier 1. The CI wiring and prereqs deploy are
+    control-plane only and work from anywhere.
+
     Idempotent: re-running keeps existing resources and just rewrites the
     bicepparam values.
 
