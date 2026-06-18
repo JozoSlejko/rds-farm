@@ -3,7 +3,7 @@
 [← Back to main README](../README.md)
 
 > [!IMPORTANT]
-> **Tier 0 owns this.** [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) takes your hostname choice (`-PublicGatewayFqdn`) and your cert mode (`-CertMode Csr | ImportPfx | SelfSigned`), creates the Key Vault, issues / imports the certificate, and writes the matching FQDN + cert URI + subject into [`main.bicepparam`](../main.bicepparam) — before any farm deploy runs.
+> **Tier 0 owns this.** [`scripts/Initialize-RdsFarm.ps1`](../scripts/Initialize-RdsFarm.ps1) takes your hostname choice (`-PublicGatewayFqdn`) and your cert mode (`-CertMode Csr | ImportPfx | SelfSigned | LetsEncrypt`), creates the Key Vault, issues / imports the certificate, and writes the matching FQDN + cert URI + subject into [`main.bicepparam`](../main.bicepparam) — before any farm deploy runs.
 >
 > This page explains the **decisions** you make at Tier 0 time and what Tier 0 does with them. The by-hand procedure for each step (for the rare CI-down / no-orchestrator path) lives in [Manual deploy](./manual-deploy.md). Cross-references to that page are linked inline below.
 

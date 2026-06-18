@@ -28,7 +28,7 @@ sign-in: each box is one action, ordered by when it runs.
 - [ ] **Target VNet + subnet exist** in Azure. Subnet must route to the DC. Optionally an `AzureBastionSubnet` (/26) if you want `deployBastion = true`.
 - [ ] **Allowed client source CIDRs decided.** Your office/VPN egress IPs only. **Never use `0.0.0.0/0`.**
 - [ ] **Public hostname strategy decided.** Vanity CNAME like `rds.contoso.com` (production — requires a public-CA cert) or the free `*.cloudapp.azure.com` hostname (lab only, paired with a self-signed cert). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md).
-- [ ] **Cert mode decided.** `Csr` (Tier 0 generates a CSR, you submit to your CA, re-run with the signed cert), `ImportPfx` (you already have a `.pfx`), or `SelfSigned` (lab only). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md#decision-2--pick-the-cert-mode).
+- [ ] **Cert mode decided.** `Csr` (Tier 0 generates a CSR, you submit to your CA, re-run with the signed cert), `ImportPfx` (you already have a `.pfx`), `SelfSigned` (lab only), or `LetsEncrypt` (free DV cert via DNS-01 for App Proxy mode — implies `-UseAppProxy`). See [Gateway FQDN and TLS certificate](./fqdn-and-cert.md#decision-2--pick-the-cert-mode) and [App Proxy](./app-proxy.md).
 
 ### Tooling on the in-VNet host (Tier 0)
 

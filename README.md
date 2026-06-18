@@ -181,9 +181,14 @@ Required values are marked **yes**. Anything else has a sensible default — omi
 | `-KeyVaultName` | **yes** | — | Globally unique Key Vault name (3–24 chars) for the TLS cert. |
 | `-ArtifactsResourceGroup` | no | `rds-artifacts-rg` | RG for the artifacts SA. |
 | `-KeyVaultResourceGroup` | no | `rds-security-rg` | RG for the Key Vault. |
-| `-CertMode` | **yes** | — | `Csr` (production, two-pass) / `ImportPfx` / `SelfSigned`. Full mode comparison: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md). |
+| `-CertMode` | **yes** | — | `Csr` (production, two-pass) / `ImportPfx` / `SelfSigned` / `LetsEncrypt` (App Proxy DV cert via DNS-01; implies `-UseAppProxy`). Full mode comparison: [`docs/fqdn-and-cert.md`](docs/fqdn-and-cert.md). |
 | `-PfxPath` | only when `-CertMode ImportPfx` | — | Path to the existing `.pfx` file. Password prompted as `SecureString`. |
 | `-CertName` | no | `rds-tls` | Name of the cert object in Key Vault. |
+| `-UseAppProxy` | no | `false` | Publish through Microsoft Entra application proxy (outbound-only connector + Entra pre-auth; no public IP / load balancer) instead of the public LB. Implied by `-CertMode LetsEncrypt`. Written to `main.bicepparam` (`useAppProxy`). See [`docs/app-proxy.md`](docs/app-proxy.md). |
+| `-AppProxyExternalFqdn` | **yes** when `-UseAppProxy` | — | External vanity hostname App Proxy publishes (e.g. `rds.contoso.com`); also the cert FQDN / subject in App Proxy mode. Written to `main.bicepparam` (`appProxyExternalFqdn`). |
+| `-AcmeContactEmail` | **yes** for `-CertMode LetsEncrypt` | — | Email for the Let's Encrypt account (cert-expiry notices). |
+| `-AcmeDnsZoneName` | no | `acme.<parent of -AppProxyExternalFqdn>` | Azure DNS public zone holding the ACME challenge TXT, delegated from your registrar. Only for `-CertMode LetsEncrypt`. |
+| `-AcmeDnsResourceGroup` | no | `rds-dns-rg` | Resource group for the ACME challenge zone (created if missing). Only for `-CertMode LetsEncrypt`. |
 | `-AppDisplayName` | no | `gh-rds-farm-deploy` | Display name for the Entra app the pipeline uses. |
 | `-RequireProductionApproval` | switch | off | Mark the `production` GitHub environment as requiring approval from the current `gh` user. Requires GH Pro/Team/Enterprise on private repos. |
 | `-BicepParamFile` | no | `<repo>/main.bicepparam` | Path to the bicepparam to patch. |
